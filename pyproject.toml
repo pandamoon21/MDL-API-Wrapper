@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdlaw"
-version = "1.5.0"
+version = "1.5.1"
 description = "Blazing-fast unofficial MyDramaList API wrapper (FastAPI + httpx, official MDL Android app API)"
 readme = "README.md"
 requires-python = ">=3.10"

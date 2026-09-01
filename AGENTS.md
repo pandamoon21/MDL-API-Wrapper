@@ -91,15 +91,15 @@ import time (no dotenv loader — set them in the shell or a process manager).
   MD5-hashed), decodes JWT `exp`, refreshes before expiry, re-logs in if
   refresh fails. 2FA is NOT supported (returns 428).
 - **Genres & languages are reference lists, not filters**: `GET /genres` and
-  `GET /languages/supported?v=2` return full catalogs. The upstream
-  `POST /search` is **currently broken** (verified live 2026-09): it ignores
-  `q` AND `genre_id`/`genres`/`language_id`/`languages`/`page`/`limit`/`sort`
-  — every query returns the identical 20-item default feed, and no
-  browse/discover/filter endpoint exists (404/405). Search items carry
+  `GET /languages/supported?v=2` return full catalogs. Search is
+  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` (recovered from
+  decompiled APK `search_repository.dart`; `q`/`page` are URL query params,
+  NOT a JSON body — GET → 405). Search items carry
   `country`/`language`/`type`/`media_type`/`year` but no `genres` field; only
-  `title(id)` detail has `genres[]`. `MDL.search()` post-filters client-side
-  on those fields; `MDL.browse_by_genre()` fetches details and filters by
-  genre (1 upstream call per candidate — keep limit small).
+  `title(id)` detail has `genres[]`. No server-side browse/filter endpoint
+  exists (404/405). `MDL.search()` post-filters client-side on those fields;
+  `MDL.browse_by_genre()` fetches details and filters by genre (1 upstream
+  call per candidate — keep limit small).
 
 ## Conventions & pitfalls
 

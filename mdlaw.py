@@ -53,7 +53,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -751,23 +751,25 @@ async def title_recommendations(tid: int) -> JSONResponse:
 
 
 @app.post("/api/v1/search")
-async def search(q: str) -> JSONResponse:
-    """Search titles by keyword. MDL moved to POST + JSON body (GET now 405)."""
+async def search(q: str, page: int = 1) -> JSONResponse:
+    """Search titles by keyword (POST /search/titles?edge=1&q=...&page=...)."""
     if not q.strip():
         raise HTTPException(400, {"error": True, "code": 400,
                                   "detail": "query param q is required"})
-    return _resp(await fetch("POST", "/search", ttl=300, auth=True,
-                             body={"q": q, "synopsis": 1}), 300)
+    return _resp(await fetch(
+        "POST", f"/search/titles?edge=1&q={q}&page={page}&synopsis=1",
+        ttl=300, auth=True), 300)
 
 
 @app.post("/api/v1/search/people")
-async def search_people(q: str) -> JSONResponse:
-    """Search people by name. MDL moved to POST + JSON body (GET now 405)."""
+async def search_people(q: str, page: int = 1) -> JSONResponse:
+    """Search people by name (POST /search/people?q=...&page=...)."""
     if not q.strip():
         raise HTTPException(400, {"error": True, "code": 400,
                                   "detail": "query param q is required"})
-    return _resp(await fetch("POST", "/search/people", ttl=300, auth=True,
-                             body={"q": q}), 300)
+    return _resp(await fetch(
+        "POST", f"/search/people?q={q}&page={page}",
+        ttl=300, auth=True), 300)
 
 
 @app.get("/api/v1/watchlist")
@@ -931,26 +933,26 @@ class MDL:
         return await self.get(f"/titles/{tid}/credits", ttl=300, auth=True)
 
     # --- search (POST) ---
-    # NOTE: verified live (2026-09) — the upstream POST /search ignores `q`
-    # entirely and always returns the same default 20-item feed (no server-side
-    # filtering, no pagination). We keep the parameter for API compat and add
-    # client-side post-filtering on the fields search results DO carry
-    # (country, language, type, media_type, year).
+    # Upstream search is POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1
+    # (recovered from decompiled APK search_repository.dart). `q` and `page`
+    # are URL query params, NOT a JSON body. Search items carry
+    # country/language/type/media_type/year but no genres field; post-filters
+    # below run in Python. Genre filtering: use browse_by_genre().
     async def search(self, q: str = "", country: str | None = None,
                      language: str | None = None, type: str | None = None,
                      media_type: str | None = None, year: int | None = None,
-                     limit: int | None = None) -> object:
-        """Search titles and optionally post-filter results client-side.
+                     limit: int | None = None, page: int = 1) -> object:
+        """Search titles (POST /search/titles?edge=1&q=...&page=...).
 
-        The upstream API has no server-side filters (verified live: q, genre_id,
-        language_id, page, limit, sort are all ignored — it always returns the
-        same 20 default items). Filters below are applied in Python to the fields
-        search results carry: ``country``, ``language``, ``type``, ``media_type``,
-        ``year``. Genre is NOT filterable here (search items have no genres field)
-        — use :meth:`browse_by_genre` instead.
+        ``q`` is passed upstream as a URL query param and IS honored (verified
+        live: ``q="crash landing on you"`` → Crash Landing on You; ``page=2``
+        returns different results). ``country``/``language``/``type``/
+        ``media_type``/``year``/``limit`` are client-side post-filters over the
+        fields search results carry. Genre is NOT filterable here (search items
+        have no genres field) — use :meth:`browse_by_genre` instead.
         """
-        results = await self.post("/search", {"q": q, "synopsis": 1},
-                                  ttl=300, auth=True)
+        results = await self.post(f"/search/titles?edge=1&q={q}&page={page}&synopsis=1",
+                                  {}, ttl=300, auth=True)
         if not isinstance(results, list):
             return results
         filtered = results
@@ -1011,8 +1013,9 @@ class MDL:
                     break
         return out
 
-    async def search_people(self, q: str) -> object:
-        return await self.post("/search/people", {"q": q}, ttl=300, auth=True)
+    async def search_people(self, q: str, page: int = 1) -> object:
+        return await self.post(f"/search/people?q={q}&page={page}", {},
+                               ttl=300, auth=True)
 
     # --- account (requires credentials) ---
     _WATCH_STATUSES = ("completed", "dropped", "onhold", "plantowatch",

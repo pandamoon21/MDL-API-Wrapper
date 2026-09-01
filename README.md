@@ -243,26 +243,27 @@ below).
 
 ### Can I filter `search()` / `title()` by genre or language?
 
-**No — the upstream API has no server-side filtering, and its search is
-currently broken.** We verified this live with an authenticated account
-(2026-09):
+**Server-side: no.** The upstream API has no browse/discover/filter endpoint —
+every candidate path (`/titles/browse`, `/discover`, `/titles/filter`, …) is
+404/405, and `GET /titles/{id}?genre_id=1` / `?genre=1` / `?language_id=462`
+silently ignores the params. `mdlaw` filters client-side instead (below).
 
-- `POST /search` **ignores `q` entirely** — `search("crash landing on you")`,
-  `search("zzz-nonexistent")`, and `search("romance")` all return the same
-  default 20-item feed (`Nana Tour with Seventeen`, `BTS in the Soop`, …).
-  Varying the body key (`q`, `query`, `keyword`, `search`), adding
-  `genre_id`/`genres`/`language_id`/`languages`/`page`/`limit`/`sort` — all
-  ignored. `POST /search/titles` behaves the same.
-- `GET /titles/{id}?genre_id=1`, `?genre=1`, `?language_id=462` → parameters
-  silently ignored.
-- Every browse/discover/filter path (`/titles/browse`, `/discover`,
-  `/titles/filter`, …) → **404/405**. No such endpoint exists.
+### Search works — correct endpoint recovered from the APK
 
-### Filtering client-side — `search()` post-filters + `browse_by_genre()`
+`search()` (and the `/api/v1/search` route) hits **`POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1`** — recovered from the decompiled Android APK (`search_repository.dart`). `q` and `page` are **URL query params**, not a JSON body. Verified live:
 
-Because upstream won't filter, `mdlaw` does it in Python. Search results carry
-`country`, `language`, `type`, `media_type`, and `year` (but **no `genres`
-field**), so `search()` post-filters on those:
+```bash
+mdlaw search "crash landing on you"
+# → "Crash Landing on You" (2019), "Crash Landing on You Special...", ...
+```
+
+Earlier builds posted `{"q": ...}` to `/search`, which the server ignored
+(returning a default feed) — fixed in 1.5.1.
+
+### Client-side filtering — `search()` post-filters + `browse_by_genre()`
+
+Search results carry `country`, `language`, `type`, `media_type`, and `year`
+(but **no `genres` field**), so `search()` post-filters on those:
 
 ```python
 await mdl.search(country="South Korea")                 # only Korean results
@@ -370,8 +371,8 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/titles/{id}/comments` | `GET /titles/{id}/comments` | 5m | — |
 | GET | `/api/v1/titles/{id}/credits` | `GET /titles/{id}/credits` | 5m | — |
 | GET | `/api/v1/titles/{id}/recommendations` | `GET /titles/{id}/recommendations` | 10m | ✅ |
-| POST | `/api/v1/search?q={q}` | `POST /search` (body `{"q", "synopsis"}`) | 5m | ✅ |
-| POST | `/api/v1/search/people?q={q}` | `POST /search/people` (body `{"q"}`) | 5m | ✅ |
+| POST | `/api/v1/search?q={q}&page={page}` | `POST /search/titles?edge=1&q={q}&page={page}&synopsis=1` | 5m | ✅ |
+| POST | `/api/v1/search/people?q={q}&page={page}` | `POST /search/people?q={q}&page={page}` | 5m | ✅ |
 | GET | `/api/v1/watchlist` | `GET /sync/mylist/watchlist` | 1m | ✅ |
 | GET | `/api/v1/watchlist/{status}` | `GET /sync/mylist/{status}` | 1m | ✅ |
 | GET | `/api/v1/me` | `GET /users/me` | 1m | ✅ |

@@ -7,24 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-02
+
+### Fixed
+
+- **Search actually searches now.** The correct upstream endpoint is
+  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` (recovered from
+  the decompiled APK `search_repository.dart`) — `q`/`page` are URL query
+  params, not a JSON body. The previous build posted `{"q": ...}` to
+  `/search`, which the server ignored (always returning a default feed).
+  `mdlaw search "crash landing on you"` now returns "Crash Landing on You"
+  (verified live); `search_people` → `POST /search/people?q=<q>&page=<page>`
+  returns real people ("lee jong" → Lee Jong Suk).
+- HTTP routes `/api/v1/search` and `/api/v1/search/people` now accept an
+  optional `page` param and forward the corrected path.
+
 ## [1.5.0] - 2026-09-02
 
 ### Added
 
 - **`MDL.search()` post-filters** — accepts `country`, `language`, `type`,
-  `media_type`, `year`, and `limit`, filtering results client-side. Upstream
-  has no server-side filters.
+  `media_type`, `year`, `limit`, and `page`. Client-side filtering because
+  upstream has no server-side filter endpoint.
 - **`MDL.browse_by_genre(genre_id, limit=10, source=...)`** — fetches
-  candidate titles (search feed / trending / top_movies), loads each detail,
-  and returns only those whose `genres[]` include the requested genre_id.
+  candidate titles (search / trending / top_movies), loads each detail, and
+  returns only those whose `genres[]` include the requested genre_id.
   One upstream title-detail call per candidate — keep `limit` small.
 
 ### Changed
 
-- Documentation updated with live-verified findings (2026-09): upstream
-  `POST /search` currently **ignores `q` and all filter/pagination params** —
-  every query returns the identical 20-item default feed; no browse/discover/
-  filter endpoint exists (404/405). Search results carry
+- Documentation updated with live-verified findings (2026-09): no
+  browse/discover/filter endpoint exists (404/405); search results carry
   `country`/`language`/`type`/`media_type`/`year` but no `genres` field.
 
 ## [1.4.0] - 2026-09-02

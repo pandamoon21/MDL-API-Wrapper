@@ -137,7 +137,7 @@ def test_mdl_library_layer(monkeypatch):
     expected = [
         ("GET", "/genres", 3600, False, None),
         ("GET", "/titles/686?expand=1", 300, True, None),
-        ("POST", "/search", 300, True, {"q": "crash", "synopsis": 1}),
+        ("POST", "/search/titles?edge=1&q=crash&page=1&synopsis=1", 300, True, {}),
         ("GET", "/sync/mylist/watchlist", 60, True, None),
         ("GET", "/sync/mylist/completed", 60, True, None),
         ("GET", "/users/me", 60, True, None),
