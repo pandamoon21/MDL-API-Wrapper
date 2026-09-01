@@ -49,7 +49,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (e.g. safari_ios) which passes the challenge.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
