@@ -59,6 +59,7 @@ path to a working setup.
 pip install mdlaw
 mdlaw                                # serves http://0.0.0.0:8000 (Swagger at /docs)
 mdlaw self                           # offline self-check
+mdlaw genres                         # one-shot JSON data commands (see below)
 ```
 
 > `mdl-api-key` is **not a secret** — it's a client nonce the MDL app generates
@@ -90,6 +91,35 @@ curl http://localhost:8000/api/v1/genres | python3 -m json.tool
 ```
 
 Interactive docs (Swagger UI): **http://localhost:8000/docs**
+
+## 🖥 CLI
+
+`mdlaw` is also a one-shot CLI — print JSON directly to the terminal (no
+server needed). Works after `pip install mdlaw`:
+
+```bash
+mdlaw genres                     # all genres
+mdlaw search "crash landing"     # search titles (requires credentials)
+mdlaw search-people "lee minho"  # search people (requires credentials)
+mdlaw title 686                  # title detail (requires credentials)
+mdlaw people 12345               # actor/crew profile
+mdlaw watchlist completed        # your watchlist (requires credentials)
+mdlaw watchlist                  # full watchlist (requires credentials)
+mdlaw me                         # your profile (requires credentials)
+mdlaw leaderboard weekly         # period: alltime | weekly | monthly
+mdlaw languages                  # supported languages
+mdlaw calendar                   # upcoming episodes
+```
+
+Output is pretty-printed JSON. Auth-gated commands use the same credentials
+as the library: `MDL_USERNAME`/`MDL_PASSWORD` env vars, or pass them inline:
+
+```bash
+MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 mdlaw search "crash landing"
+```
+
+Errors print a clean `error: ...` message to stderr with exit code 1 — no
+tracebacks.
 
 ## 🐍 Use as a Python package
 

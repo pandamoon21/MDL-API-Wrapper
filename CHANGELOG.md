@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MDL(username=..., password=...)` — authenticate as a library directly in
   the constructor (alternative to `MDL_USERNAME`/`MDL_PASSWORD` env vars,
   which are read at import time). Auto-login + auto-refresh unchanged.
+- **One-shot CLI data commands**: `mdlaw genres`, `mdlaw search "q"`,
+  `mdlaw title 686`, `mdlaw watchlist`, `mdlaw me`, `mdlaw leaderboard`, … —
+  print pretty JSON to stdout without starting a server. Clean `error: ...`
+  to stderr + exit code 1 on failure (no tracebacks).
 
 ### Changed
 

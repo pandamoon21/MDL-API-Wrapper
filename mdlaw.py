@@ -49,7 +49,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (e.g. safari_ios) which passes the challenge.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -932,6 +932,58 @@ def self_check() -> int:
     return 0
 
 
+def _run_cli(args: list[str]) -> int:
+    """One-shot data commands: mdlaw genres, mdlaw search 'q', mdlaw title 686 ..."""
+    import asyncio
+    import json as _json
+
+    cmd, rest = args[0], args[1:]
+
+    async def call():
+        mdl = MDL()
+        try:
+            if cmd == "genres":
+                return await mdl.genres()
+            if cmd == "languages":
+                return await mdl.languages()
+            if cmd == "calendar":
+                return await mdl.calendar()
+            if cmd == "search":
+                if not rest:
+                    raise SystemExit("usage: mdlaw search <query>")
+                return await mdl.search(" ".join(rest))
+            if cmd == "search-people":
+                if not rest:
+                    raise SystemExit("usage: mdlaw search-people <name>")
+                return await mdl.search_people(" ".join(rest))
+            if cmd == "title":
+                if not rest:
+                    raise SystemExit("usage: mdlaw title <id>")
+                return await mdl.title(int(rest[0]))
+            if cmd == "people":
+                if not rest:
+                    raise SystemExit("usage: mdlaw people <id>")
+                return await mdl.people(int(rest[0]))
+            if cmd == "watchlist":
+                return await mdl.watchlist(rest[0] if rest else None)
+            if cmd == "me":
+                return await mdl.me()
+            if cmd == "leaderboard":
+                return await mdl.leaderboard(rest[0] if rest else "alltime")
+            raise SystemExit(f"unknown command: {cmd}")
+        finally:
+            await mdl.close()
+
+    try:
+        data = asyncio.run(call())
+    except HTTPException as e:
+        import sys
+        print(f"error: {e.detail}", file=sys.stderr)
+        return 1
+    print(_json.dumps(data, indent=2, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point (console script `mdlaw`)."""
     import sys
@@ -940,6 +992,8 @@ def main(argv: list[str] | None = None) -> int:
         return self_check()
     if args and args[0] in ("serve", "run"):
         args = args[1:]
+    if args and args[0] not in ("serve", "run"):
+        return _run_cli(args)
     import uvicorn
     uvicorn.run("mdlaw:app", host="0.0.0.0", port=8000)
     return 0
