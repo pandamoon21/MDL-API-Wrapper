@@ -1,14 +1,17 @@
 # mdlaw — Docker Compose (production-ish)
 # Usage:
-#   cp .env.example .env   # fill MDL_API_KEY (REQUIRED) + optional MDL_USERNAME/PASSWORD, cache
+#   cp .env.example .env   # fill optional MDL_USERNAME/PASSWORD, cache backend
 #   docker compose up -d
+#
+# No API key needed — mdl-api-key is an optional client nonce, so mdlaw works
+# with zero configuration. Set MDL_API_KEY only to pin a value.
 services:
   mdlaw:
     build: .
     ports:
       - "8000:8000"
     environment:
-      MDL_API_KEY: ${MDL_API_KEY:?MDL_API_KEY is required on the public build}
+      MDL_API_KEY: ${MDL_API_KEY:-}
       MDL_USERNAME: ${MDL_USERNAME:-}
       MDL_PASSWORD: ${MDL_PASSWORD:-}
       MDL_CACHE_BACKEND: ${MDL_CACHE_BACKEND:-memory}

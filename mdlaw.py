@@ -14,10 +14,13 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
+import string
 import time
 import uuid
 
 import httpx
+from typing import Any
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -27,11 +30,24 @@ from contextlib import asynccontextmanager
 # ---------------------------------------------------------------------------
 API_BASE = "https://app-api.mydramalist.com/v1"
 
-# Public build: the MDL API key is NOT in the source. You MUST provide it
-# via the MDL_API_KEY env var. Import is safe without it (so `pip install
-# mdlaw` + `import mdlaw` works); the server refuses to START without it
-# (checked in lifespan startup) and the CLI self-check requires it.
-API_KEY = os.environ.get("MDL_API_KEY", "").strip()
+# `mdl-api-key` is NOT a secret: the MDL app generates a random 20-char
+# nonce per launch and the server never validates it (verified live: no
+# header and random values both return 200). It is only a client nonce, so
+# we generate one too. You can still pin a specific value with MDL_API_KEY
+# for reproducible requests — it carries no security meaning.
+# (Confirmed by danieyal/pymdl docs/api-key-extraction.md.)
+API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
+    secrets.choice(string.ascii_letters + string.digits) for _ in range(20)
+)
+
+# Optional: use curl_cffi (browser/mobile TLS impersonation) instead of httpx.
+# The real gate on the MDL API is Cloudflare bot protection, which
+# fingerprints the TLS/HTTP2 handshake (JA3/JA4). From most residential IPs a
+# plain httpx client with the okhttp header scheme passes; from datacenter /
+# flagged IPs Cloudflare serves a "403 Just a moment..." challenge to plain
+# TLS stacks. Set MDL_TRANSPORT=curl_cffi to use curl_cffi's impersonation
+# (e.g. safari_ios) which passes the challenge.
+TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
 __version__ = "1.0.0"
 
@@ -288,10 +304,26 @@ async def _throttle() -> None:
 
 
 _client: httpx.AsyncClient | None = None
+_cffi: Any | None = None
 
 
-def get_client() -> httpx.AsyncClient:
-    global _client
+def _url(path: str) -> str:
+    """Full upstream URL. httpx tolerates absolute URLs on a base_url client;
+    curl_cffi's AsyncSession has no base_url support, so callers always pass
+    the absolute URL."""
+    return API_BASE + path
+
+
+def get_client() -> httpx.AsyncClient | Any:
+    """Return the shared upstream client. Default transport is httpx (plain
+    TLS); set MDL_TRANSPORT=curl_cffi to use curl_cffi's browser/mobile TLS
+    impersonation (passes Cloudflare's JA3/JA4 challenge from flagged IPs)."""
+    global _client, _cffi
+    if TRANSPORT == "curl_cffi":
+        if _cffi is None:
+            from curl_cffi.requests import AsyncSession
+            _cffi = AsyncSession(impersonate="safari_ios", headers=default_headers())
+        return _cffi
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
             base_url=API_BASE,
@@ -302,21 +334,25 @@ def get_client() -> httpx.AsyncClient:
     return _client
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    """Startup/shutdown: verify the API key is present (public build requires
-    it — fail fast, not on first request), then nothing else to init (lazy
-    client); close the httpx client on shutdown so uvicorn/gunicorn can
-    restart cleanly."""
-    if not API_KEY:
-        raise RuntimeError(
-            "MDL_API_KEY is required. "
-            "Set it in your environment (e.g. export MDL_API_KEY=... or in .env) "
-            "before starting the server."
-        )
-    yield
+async def close_client() -> None:
+    """Close the shared upstream client (httpx or curl_cffi session)."""
+    global _client, _cffi
+    if _cffi is not None:
+        try:
+            await _cffi.close()
+        except Exception:
+            pass
+        _cffi = None
     if _client is not None and not _client.is_closed:
         await _client.aclose()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Startup/shutdown: nothing to init (client is lazy); close the upstream
+    client on shutdown so uvicorn/gunicorn can restart cleanly."""
+    yield
+    await close_client()
 
 
 async def fetch(method: str, path: str, ttl: float,
@@ -339,11 +375,11 @@ async def fetch(method: str, path: str, ttl: float,
     async with _SEM:
         await _throttle()
         try:
-            r = await get_client().request(method, path, headers=headers, json=body)
+            r = await get_client().request(method, _url(path), headers=headers, json=body)
             if r.status_code == 401 and auth and auth_enabled():
                 await refresh()
                 headers = await auth_headers()
-                r = await get_client().request(method, path, headers=headers, json=body)
+                r = await get_client().request(method, _url(path), headers=headers, json=body)
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise _upstream_error(e.response.status_code, e.response.text) from e
@@ -410,7 +446,7 @@ async def _auth_request(method: str, path: str, body: dict | None = None,
     async with _SEM:
         await _throttle()
         try:
-            r = await get_client().request(method, path, headers=h, json=body)
+            r = await get_client().request(method, _url(path), headers=h, json=body)
         except httpx.HTTPStatusError as e:
             raise _upstream_error(e.response.status_code, e.response.text) from e
         except httpx.TimeoutException as e:
@@ -599,7 +635,8 @@ async def dashboard() -> dict:
         },
         "upstream": {
             "base": API_BASE,
-            "key_source": "plaintext",
+            "key_source": "env" if os.environ.get("MDL_API_KEY") else "generated-nonce",
+            "transport": TRANSPORT,
         },
         "auth": {
             "configured": auth_enabled(),
@@ -750,7 +787,9 @@ async def payment_coins() -> JSONResponse:
 # Offline self-check
 # ---------------------------------------------------------------------------
 def self_check() -> int:
-    assert API_KEY, "API key must be set (MDL_API_KEY env var)"
+    # API_KEY is always set: from MDL_API_KEY env, or a generated nonce.
+    assert API_KEY and len(API_KEY) == 20, "API key must be a 20-char nonce"
+    assert TRANSPORT in ("httpx", "curl_cffi"), f"unknown MDL_TRANSPORT={TRANSPORT}"
     h = default_headers()
     assert h["mdl-api-key"] == API_KEY
     assert h["User-Agent"] == "okhttp/4.12.0" and h["Accept"] == "*/*"
@@ -779,7 +818,8 @@ def self_check() -> int:
     row = cur.fetchone()
     assert row is not None and row[0] == 0, "same value must not flag changed"
     cur.close()
-    print(f"PASS: offline checks (key={API_KEY!r}, headers, cache, md5, sqlcache)")
+    print(f"PASS: offline checks (key={'env' if os.environ.get('MDL_API_KEY') else 'nonce'} len={len(API_KEY)}, "
+          f"transport={TRANSPORT}, headers, cache, md5, sqlcache)")
     return 0
 
 

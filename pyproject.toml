@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 mysql = ["pymysql>=1.1"]
 postgres = ["psycopg[binary]>=3.1"]
+curl_cffi = ["curl_cffi>=0.16"]
 
 [project.scripts]
 mdlaw = "mdlaw:main"

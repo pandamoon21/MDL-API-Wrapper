@@ -5,17 +5,21 @@ import os
 import mdlaw
 
 
-def test_key_required():
-    # public build: key must come from env (no embedded key)
-    assert mdlaw.API_KEY == os.environ.get("MDL_API_KEY", "").strip()
-    assert mdlaw.API_KEY, "MDL_API_KEY must be set in env for tests"
+def test_key_optional():
+    # public build: mdl-api-key is a client nonce, not a secret. API_KEY comes
+    # from MDL_API_KEY env if set, otherwise a random 20-char nonce is generated.
+    assert len(mdlaw.API_KEY) == 20
+    if os.environ.get("MDL_API_KEY"):
+        assert mdlaw.API_KEY == os.environ["MDL_API_KEY"].strip()
+    # default transport is httpx; curl_cffi is opt-in via env
+    assert mdlaw.TRANSPORT in ("httpx", "curl_cffi")
 
 
 def test_import_without_key_ok():
-    # pip install mdlaw → `import mdlaw` must work even without MDL_API_KEY;
-    # the server refuses to START without it (lifespan), not the import.
+    # pip install mdlaw → `import mdlaw` works with no env at all; API_KEY is
+    # generated as a nonce. Server also starts fine (no key requirement).
     import subprocess
-    code = "import mdlaw; assert not mdlaw.API_KEY; print('import-ok')"
+    code = "import mdlaw; assert mdlaw.API_KEY and len(mdlaw.API_KEY) == 20; print('import-ok')"
     r = subprocess.run(["python3", "-c", code], capture_output=True, text=True,
                        env={k: v for k, v in os.environ.items() if k != "MDL_API_KEY"})
     assert r.returncode == 0, r.stderr
@@ -24,11 +28,11 @@ def test_import_without_key_ok():
 
 def test_key_not_literal_in_source():
     src = open("mdlaw.py", encoding="utf-8").read()
-    # public build: key must come ONLY from env — no embedded literal,
-    # no fallback, no blob/XOR key machinery (b64decode is fine: it's used
-    # for JWT exp decoding in auth, not for the key)
+    # public build: no embedded literal key, no fixed fallback — the fallback
+    # is a runtime-generated nonce (secrets + string + range(20)). No blob/XOR
+    # key machinery (b64decode is fine: used for JWT exp decoding in auth).
     assert 'os.environ.get("MDL_API_KEY"' in src, "key must come from env"
-    assert 'or "' not in src.split("MDL_API_KEY")[1][:200], "no fallback literal"
+    assert "secrets.choice(string.ascii_letters + string.digits)" in src, "fallback must be a generated nonce"
     assert "_BLOB" not in src and "_MASK" not in src
     assert "mdlaw-xor" not in src
 

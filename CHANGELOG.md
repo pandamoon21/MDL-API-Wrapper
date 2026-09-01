@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Nothing yet.
+- `mdl-api-key` is now treated as the client nonce it actually is: no key
+  required (a 20-char nonce is generated automatically), `MDL_API_KEY` only
+  pins a value for reproducible requests. Server starts with zero config.
+- New optional `MDL_TRANSPORT=curl_cffi` transport — browser/mobile TLS
+  impersonation that passes Cloudflare's JA3/JA4 challenge from
+  flagged/datacenter IPs (`pip install curl_cffi`).
 
 ## [1.0.0] - 2026-09-01
 

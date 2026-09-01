@@ -17,7 +17,7 @@ Built from reverse-engineering `com.mydramalist.app` v2.3.18 (Flutter/Dio): the 
 | Fragility | Breaks when site markup changes | Stable — same API the app uses |
 | WAF risk | High | Throttled + cached outbound |
 
-The Android app talks to a JSON API behind Cloudflare. `mdlaw` replicates the exact request headers the app sends (validated: without them the API returns **403**), so it gets **real structured data** — not scraped HTML.
+The Android app talks to a JSON API behind Cloudflare. `mdlaw` replicates the exact request headers the app sends, so it gets **real structured data** — not scraped HTML.
 
 ## 📊 Real-world benchmark (measured, not estimated)
 
@@ -57,10 +57,14 @@ path to a working setup.
 
 ```bash
 pip install mdlaw
-export MDL_API_KEY=<your-key>        # REQUIRED — no key embedded in the public build
 mdlaw                                # serves http://0.0.0.0:8000 (Swagger at /docs)
-mdlaw self                           # offline self-check (needs MDL_API_KEY)
+mdlaw self                           # offline self-check
 ```
+
+> `mdl-api-key` is **not a secret** — it's a client nonce the MDL app generates
+> per launch, and the server never validates it (verified live). `mdlaw`
+> generates one for you; set `MDL_API_KEY` only to pin a value for reproducible
+> requests.
 
 **Option 2 — from source:**
 
@@ -130,7 +134,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MDL_API_KEY=${MDL_API_KEY}   # optional
+      - MDL_USERNAME=${MDL_USERNAME}   # optional
+      - MDL_PASSWORD=${MDL_PASSWORD}   # optional
     restart: unless-stopped
 ```
 
@@ -320,22 +325,39 @@ Everything `mdlaw` needs is set via environment variables. Here's the full pictu
 
 | Variable | Required? | What it does | Default |
 |---|---|---|---|
-| `MDL_API_KEY` | **Yes** | The MDL app API key (not in source — you provide it) | — |
+| `MDL_API_KEY` | No | Pin a fixed `mdl-api-key` (client nonce; optional, no security meaning) | generated nonce |
+| `MDL_TRANSPORT` | No | `httpx` (plain TLS) or `curl_cffi` (TLS impersonation, passes Cloudflare challenge) | `httpx` |
 | `MDL_USERNAME` | No | Enables auth-gated endpoints (title detail, search, watchlist, `/me`) | disabled |
 | `MDL_PASSWORD` | No | Password for the account above (paired with `MDL_USERNAME`) | disabled |
 | `MDL_CACHE_BACKEND` | No | `memory` · `sqlite` · `mysql` · `postgres` | `memory` |
 | `MDL_CACHE_DB_URL` | Only if backend ≠ memory | DSN, e.g. `sqlite:///mdlaw_cache.db` | — |
 
-### 🔐 API key (required)
+### 🔐 API key (optional)
 
-The MDL Android app talks to `app-api.mydramalist.com` with a hardcoded
-`mdl-api-key` header. This public build does **not** embed that key — you must
-provide it yourself (extract from the APK, or get it from a collaborator
-who has access to the app key). The server **refuses to start** without `MDL_API_KEY`:
+`mdl-api-key` looks like a secret but **isn't one**: it's a 20-character client
+nonce that the MDL Android app generates on every launch
+(`Utils.getRandomString()` in `main.dart`), and the server **never validates
+it** — verified live: requests with no header, with the "real" key, and with a
+random value all return `200 OK`. The actual access gate is Cloudflare bot
+protection (TLS/JA3 fingerprint), not this header.
+
+So there is **nothing to configure**: `mdlaw` generates a valid nonce for you
+and just works. Set `MDL_API_KEY` only if you want reproducible requests.
 
 ```bash
-export MDL_API_KEY=<your-key>
-uvicorn mdlaw:app --port 8000
+uvicorn mdlaw:app --port 8000   # no env needed — works out of the box
+```
+
+### 🔀 Transport (optional)
+
+From most residential IPs, plain `httpx` with the app's header scheme passes.
+If Cloudflare serves you a `403 "Just a moment..."` challenge (common on
+datacenter/flagged IPs), switch to the `curl_cffi` transport, which
+impersonates a real browser/mobile TLS fingerprint:
+
+```bash
+pip install curl_cffi
+MDL_TRANSPORT=curl_cffi uvicorn mdlaw:app --port 8000
 ```
 
 ### 👤 Account (optional)
@@ -382,12 +404,14 @@ curl http://localhost:8000/api/v1/auth/status
 
 ## 🚢 Deploy
 
-All options below. This is the **public** build: `MDL_API_KEY` is **required**
-everywhere — the app refuses to start without it.
+All options below. This is the **public** build: `mdlaw` works with **zero
+configuration** — the API key is an optional client nonce, so there is no
+required env var.
 
 | Env | Public build |
 |---|---|
-| `MDL_API_KEY` | **required** |
+| `MDL_API_KEY` | optional (pin a nonce for reproducible requests) |
+| `MDL_TRANSPORT` | optional (`curl_cffi` for Cloudflare-challenged IPs) |
 | `MDL_USERNAME` + `MDL_PASSWORD` | optional (auth-gated endpoints) |
 | `MDL_CACHE_BACKEND` + `MDL_CACHE_DB_URL` | optional (persistent cache) |
 
@@ -397,8 +421,7 @@ everywhere — the app refuses to start without it.
 # 1. One-time: create the app (reads fly.toml)
 fly launch --no-deploy
 
-# 2. Set secrets (MDL_API_KEY REQUIRED)
-fly secrets set MDL_API_KEY=<your-key>
+# 2. Set secrets (all optional)
 fly secrets set MDL_USERNAME=<your-user> MDL_PASSWORD=<your-pass>   # optional
 fly secrets set MDL_CACHE_BACKEND=sqlite MDL_CACHE_DB_URL=sqlite:////data/mdlaw_cache.db   # optional
 
@@ -430,8 +453,8 @@ Works, **but know the trade-offs**:
 ```bash
 npx vercel
 # when prompted, set env vars in the Vercel dashboard:
-#   Settings → Environment Variables → add MDL_API_KEY (REQUIRED),
-#   MDL_USERNAME, MDL_PASSWORD, MDL_CACHE_BACKEND, MDL_CACHE_DB_URL
+#   Settings → Environment Variables → add MDL_USERNAME, MDL_PASSWORD,
+#   MDL_CACHE_BACKEND, MDL_CACHE_DB_URL  (all optional; MDL_API_KEY not needed)
 ```
 
 Two files are already included (`api/index.py` + `vercel.json`). Caveats:
@@ -446,9 +469,8 @@ Two files are already included (`api/index.py` + `vercel.json`). Caveats:
 ```bash
 docker build -t mdlaw .
 
-# MDL_API_KEY REQUIRED
+# all env vars optional — no API key needed
 docker run -p 8000:8000 \
-  -e MDL_API_KEY=<your-key> \
   -e MDL_USERNAME=<your-user> -e MDL_PASSWORD=<your-pass> \
   -e MDL_CACHE_BACKEND=sqlite -e MDL_CACHE_DB_URL=sqlite:////data/mdlaw_cache.db \
   -v mdlaw_data:/data \
@@ -465,7 +487,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      MDL_API_KEY: ${MDL_API_KEY}        # required
       MDL_USERNAME: ${MDL_USERNAME}      # optional
       MDL_PASSWORD: ${MDL_PASSWORD}      # optional
       MDL_CACHE_BACKEND: ${MDL_CACHE_BACKEND:-memory}
@@ -480,7 +501,6 @@ volumes:
 
 ```bash
 # .env (same folder, gitignored)
-MDL_API_KEY=your-key
 MDL_USERNAME=your-user
 MDL_PASSWORD=your-pass
 MDL_CACHE_BACKEND=sqlite
