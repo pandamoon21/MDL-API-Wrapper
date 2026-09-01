@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -436,6 +436,7 @@ _auth = {
     "refresh_token": None,
     "device_id": str(uuid.uuid4()),
     "user": None,
+    "username": None,
     "expires_at": 0.0,
     "login_error": None,
     "last_login": None,
@@ -571,6 +572,7 @@ def _save_auth() -> None:
         "device_id": _auth["device_id"],
         "expires_at": _auth["expires_at"],
         "user": _auth["user"],
+        "username": MDL_USERNAME,
     }
     with open(_AUTH_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -593,6 +595,8 @@ def _load_auth() -> bool:
     _auth.update({k: data[k] for k in
                   ("token", "refresh_token", "device_id", "expires_at", "user")
                   if k in data})
+    if "username" in data:
+        _auth["username"] = data["username"]
     if not MDL_USERNAME:
         MDL_USERNAME = "saved"
     if not MDL_PASSWORD:
@@ -1234,7 +1238,8 @@ def _cli_auth_status() -> int:
         print("not logged in (run `mdlaw auth`)")
         return 0
     user = _auth["user"] if isinstance(_auth["user"], dict) else {}
-    name = user.get("name") or user.get("username") or ""
+    name = (user.get("name") or user.get("username")
+            or _auth.get("username") or "")
     remaining = max(0, int(_auth["expires_at"] - time.time()))
     print(f"logged in as: {name}")
     print(f"token expires in: {remaining // 3600}h {remaining % 3600 // 60}m")

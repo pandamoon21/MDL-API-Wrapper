@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-02
+
+### Fixed
+
+- `mdlaw auth status` now shows the account name. The MDL login response
+  does not include a `user` object, so `_auth["user"]` was always `None` and
+  status printed an empty `logged in as:`. The CLI now stores the login
+  `username` in the session file and falls back to it.
+
 ## [1.5.2] - 2026-09-02
 
 ### Changed

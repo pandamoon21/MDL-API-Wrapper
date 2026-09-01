@@ -246,3 +246,23 @@ def test_browse_by_genre(monkeypatch):
         out2 = await mdl.browse_by_genre(13, limit=5)
         assert [i["id"] for i in out2] == [2]
     asyncio.run(run())
+
+
+def test_auth_status_shows_username(tmp_path, monkeypatch, capsys):
+    # auth status must show the account name even though the login response
+    # has no `user` object (verified live) — the CLI stores `username` in the
+    # session file and status falls back to it.
+    import json
+    auth_file = tmp_path / ".mdlaw_auth.json"
+    auth_file.write_text(json.dumps({
+        "token": "t", "refresh_token": "r", "device_id": "d",
+        "expires_at": time.time() + 3600, "user": None, "username": "nasa@x.com",
+    }))
+    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
+    mdlaw._load_auth()
+    assert mdlaw._cli_auth_status() == 0
+    out = capsys.readouterr().out
+    assert "logged in as: nasa@x.com" in out
+    assert "token expires in:" in out
+    assert "0h 59m" in out or "1h 0m" in out
+
