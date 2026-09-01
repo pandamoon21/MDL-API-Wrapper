@@ -92,9 +92,8 @@ import time (no dotenv loader — set them in the shell or a process manager).
   refresh fails. 2FA is NOT supported (returns 428).
 - **Genres & languages are reference lists, not filters**: `GET /genres` and
   `GET /languages/supported?v=2` return full catalogs. Search is
-  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` (recovered from
-  decompiled APK `search_repository.dart`; `q`/`page` are URL query params,
-  NOT a JSON body — GET → 405). Search items carry
+  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` — `q`/`page` are
+  URL query params, NOT a JSON body — GET → 405. Search items carry
   `country`/`language`/`type`/`media_type`/`year` but no `genres` field; only
   `title(id)` detail has `genres[]`. No server-side browse/filter endpoint
   exists (404/405). `MDL.search()` post-filters client-side on those fields;

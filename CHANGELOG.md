@@ -7,14 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-02
+
+### Changed
+
+- Cleaned up internal comments/docs to state API facts directly (no
+  research-process references).
+
 ## [1.5.1] - 2026-09-02
 
 ### Fixed
 
 - **Search actually searches now.** The correct upstream endpoint is
-  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` (recovered from
-  the decompiled APK `search_repository.dart`) — `q`/`page` are URL query
-  params, not a JSON body. The previous build posted `{"q": ...}` to
+  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` — `q`/`page` are
+  URL query params, not a JSON body. The previous build posted `{"q": ...}` to
   `/search`, which the server ignored (always returning a default feed).
   `mdlaw search "crash landing on you"` now returns "Crash Landing on You"
   (verified live); `search_people` → `POST /search/people?q=<q>&page=<page>`

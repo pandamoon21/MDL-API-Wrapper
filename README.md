@@ -248,9 +248,9 @@ every candidate path (`/titles/browse`, `/discover`, `/titles/filter`, …) is
 404/405, and `GET /titles/{id}?genre_id=1` / `?genre=1` / `?language_id=462`
 silently ignores the params. `mdlaw` filters client-side instead (below).
 
-### Search works — correct endpoint recovered from the APK
+### Search works — correct endpoint
 
-`search()` (and the `/api/v1/search` route) hits **`POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1`** — recovered from the decompiled Android APK (`search_repository.dart`). `q` and `page` are **URL query params**, not a JSON body. Verified live:
+`search()` (and the `/api/v1/search` route) hits **`POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1`** — `q` and `page` are **URL query params**, not a JSON body. Verified live:
 
 ```bash
 mdlaw search "crash landing on you"

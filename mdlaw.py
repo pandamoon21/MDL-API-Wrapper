@@ -35,7 +35,6 @@ API_BASE = "https://app-api.mydramalist.com/v1"
 # header and random values both return 200). It is only a client nonce, so
 # we generate one too. You can still pin a specific value with MDL_API_KEY
 # for reproducible requests — it carries no security meaning.
-# (Confirmed by danieyal/pymdl docs/api-key-extraction.md.)
 API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
     secrets.choice(string.ascii_letters + string.digits) for _ in range(20)
 )
@@ -53,10 +52,10 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
-# Header scheme recovered from RequestHeaders.json() — validated: without
-# User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
+# Header scheme: without User-Agent + Accept-Language + Accept the API
+# returns 403 (Cloudflare WAF).
 def default_headers(token: str | None = None) -> dict[str, str]:
     h = {
         "Content-Type": "application/json",
@@ -428,7 +427,7 @@ def _upstream_error(status: int, body: str) -> HTTPException:
 # env and transparently refreshes the token when it expires (on HTTP 401 /
 # invalid_grant), so every request can be authenticated. 2FA is NOT supported
 # here — if your account has 2FA enabled, either disable it or use an app
-# password. Reverse-engineered from REPORT.md §1 (auth flow).
+# password.
 MDL_USERNAME = os.environ.get("MDL_USERNAME", "").strip()
 MDL_PASSWORD = os.environ.get("MDL_PASSWORD", "").strip()
 
@@ -933,9 +932,8 @@ class MDL:
         return await self.get(f"/titles/{tid}/credits", ttl=300, auth=True)
 
     # --- search (POST) ---
-    # Upstream search is POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1
-    # (recovered from decompiled APK search_repository.dart). `q` and `page`
-    # are URL query params, NOT a JSON body. Search items carry
+    # Upstream search is POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1.
+    # `q` and `page` are URL query params, NOT a JSON body. Search items carry
     # country/language/type/media_type/year but no genres field; post-filters
     # below run in Python. Genre filtering: use browse_by_genre().
     async def search(self, q: str = "", country: str | None = None,
