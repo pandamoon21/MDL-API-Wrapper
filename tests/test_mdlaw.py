@@ -97,3 +97,38 @@ def test_sql_cache_change_detection():
     row = cur.fetchone()
     assert row is not None and row[0] == 0
     cur.close()
+
+
+def test_mdl_library_layer(monkeypatch):
+    # MDL is a Pythonic wrapper over fetch(): verify method → path mapping
+    # offline by stubbing fetch (no network).
+    calls = []
+    async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
+        calls.append((method, path, ttl, auth, body))
+        return {"ok": True}
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+
+    async def run():
+        mdl = mdlaw.MDL()
+        await mdl.genres()
+        await mdl.title(686)
+        await mdl.search("crash")
+        await mdl.watchlist()
+        await mdl.watchlist("completed")
+        await mdl.me()
+        try:
+            await mdl.watchlist("bogus")
+        except Exception:
+            pass  # invalid status → HTTPException
+        return mdl
+    asyncio.run(run())
+
+    expected = [
+        ("GET", "/genres", 3600, False, None),
+        ("GET", "/titles/686?expand=1", 300, True, None),
+        ("POST", "/search", 300, True, {"q": "crash", "synopsis": 1}),
+        ("GET", "/sync/mylist/watchlist", 60, True, None),
+        ("GET", "/sync/mylist/completed", 60, True, None),
+        ("GET", "/users/me", 60, True, None),
+    ]
+    assert calls == expected, calls

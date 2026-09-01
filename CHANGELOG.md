@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python package layer**: new `MDL` class — use `mdlaw` as an async library
+  without the HTTP server (`from mdlaw import MDL; await mdl.genres()`). All
+  methods share the same cache, throttle, auth and transport. See README
+  "Use as a Python package".
+
 ### Changed
 
 - `mdl-api-key` is now treated as the client nonce it actually is: no key

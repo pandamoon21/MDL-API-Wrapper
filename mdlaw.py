@@ -49,7 +49,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (e.g. safari_ios) which passes the challenge.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -781,6 +781,110 @@ async def payment_plans() -> JSONResponse:
 @app.get("/api/v1/payment/coins")
 async def payment_coins() -> JSONResponse:
     return _resp(await fetch("GET", "/payment/coins", ttl=3600), 3600)
+
+
+# ---------------------------------------------------------------------------
+# Python package layer — use mdlaw as a library without the HTTP server.
+#   from mdlaw import MDL
+#   mdl = MDL()
+#   genres = await mdl.genres()
+#   title = await mdl.title(686)
+# Each method wraps fetch() → shared cache, throttle, auth, transport.
+# ---------------------------------------------------------------------------
+class MDL:
+    """Pythonic client for the MDL app API (no server needed).
+
+    All methods are async and share the module-level cache, throttle, auth
+    and transport. Construct once, call many, `await mdl.close()` at exit.
+    """
+
+    def __init__(self, transport: str | None = None):
+        if transport:
+            global TRANSPORT
+            TRANSPORT = transport
+
+    async def get(self, path: str, ttl: float = 3600, auth: bool = False) -> object:
+        return await fetch("GET", path, ttl=ttl, auth=auth)
+
+    async def post(self, path: str, body: dict, ttl: float = 300,
+                   auth: bool = False) -> object:
+        return await fetch("POST", path, ttl=ttl, auth=auth, body=body)
+
+    # --- public data ---
+    async def genres(self) -> object:
+        return await self.get("/genres", ttl=3600)
+
+    async def languages(self) -> object:
+        return await self.get("/languages/supported?v=2", ttl=3600)
+
+    async def calendar(self) -> object:
+        return await self.post("/calendar/episodes", {}, ttl=3600)
+
+    async def articles_featured(self, page: int = 1) -> object:
+        return await self.get(f"/articles/featured?page={page}", ttl=600)
+
+    async def lists_featured(self, limit: int = 5) -> object:
+        return await self.get(f"/lists/featured?limit={limit}", ttl=600)
+
+    async def lists_popular(self, limit: int = 5) -> object:
+        return await self.get(f"/lists/popular_voting_lists?limit={limit}", ttl=600)
+
+    async def leaderboard(self, period: str = "alltime") -> object:
+        return await self.get(f"/people/leaderboard?time_period={period}", ttl=600)
+
+    async def people(self, pid: int) -> object:
+        return await self.get(f"/people/{pid}", ttl=86400)
+
+    async def payment_plans(self) -> object:
+        return await self.get("/payment/plans", ttl=3600)
+
+    async def payment_coins(self) -> object:
+        return await self.get("/payment/coins", ttl=3600)
+
+    # --- titles ---
+    async def title(self, tid: int) -> object:
+        """Title detail — requires account credentials (auth-gated upstream)."""
+        return await self.get(f"/titles/{tid}?expand=1", ttl=300, auth=True)
+
+    async def title_reviews(self, tid: int) -> object:
+        return await self.get(f"/titles/{tid}/reviews", ttl=300)
+
+    async def title_recommendations(self, tid: int) -> object:
+        return await self.get(f"/titles/{tid}/recommendations", ttl=600, auth=True)
+
+    async def title_comments(self, tid: int) -> object:
+        return await self.get(f"/titles/{tid}/comments", ttl=300)
+
+    async def title_credits(self, tid: int) -> object:
+        return await self.get(f"/titles/{tid}/credits", ttl=300, auth=True)
+
+    # --- search (POST) ---
+    async def search(self, q: str) -> object:
+        return await self.post("/search", {"q": q, "synopsis": 1}, ttl=300, auth=True)
+
+    async def search_people(self, q: str) -> object:
+        return await self.post("/search/people", {"q": q}, ttl=300, auth=True)
+
+    # --- account (requires credentials) ---
+    _WATCH_STATUSES = ("completed", "dropped", "onhold", "plantowatch",
+                       "notinterested", "undecided")
+
+    async def watchlist(self, status: str | None = None) -> object:
+        if status and status not in self._WATCH_STATUSES:
+            raise HTTPException(400, {"error": True, "code": 400,
+                                      "detail": f"status must be one of {self._WATCH_STATUSES}"})
+        path = f"/sync/mylist/{status}" if status else "/sync/mylist/watchlist"
+        return await self.get(path, ttl=60, auth=True)
+
+    async def me(self) -> object:
+        return await self.get("/users/me", ttl=60, auth=True)
+
+    # --- lifecycle ---
+    async def close(self) -> None:
+        await close_client()
+
+    def stats(self) -> dict:
+        return cache.stats()
 
 
 # ---------------------------------------------------------------------------

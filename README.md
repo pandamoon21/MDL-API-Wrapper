@@ -91,6 +91,40 @@ curl http://localhost:8000/api/v1/genres | python3 -m json.tool
 
 Interactive docs (Swagger UI): **http://localhost:8000/docs**
 
+## 🐍 Use as a Python package
+
+`mdlaw` works as a library too — no server needed. All methods are async and
+share the same cache, throttle, auth and transport as the HTTP API:
+
+```python
+import asyncio
+from mdlaw import MDL
+
+async def main():
+    mdl = MDL()                      # optional: MDL(transport="curl_cffi")
+
+    genres = await mdl.genres()      # list of genres
+    title = await mdl.title(686)     # title detail (requires account credentials)
+    results = await mdl.search("crash landing")   # search titles
+    watch = await mdl.watchlist("completed")      # your watchlist (requires credentials)
+    me = await mdl.me()              # your profile (requires credentials)
+
+    print(mdl.stats())               # {'backend': 'TTLCache', 'hits': ..., ...}
+    await mdl.close()                # close the HTTP session
+
+asyncio.run(main())
+```
+
+Every `MDL` method maps to a route: `genres()`, `languages()`, `calendar()`,
+`articles_featured()`, `lists_featured()`, `lists_popular()`, `leaderboard()`,
+`people()`, `payment_plans()`, `payment_coins()`, `title()`,
+`title_reviews()`, `title_recommendations()`, `title_comments()`,
+`title_credits()`, `search()`, `search_people()`, `watchlist()`, `me()`.
+
+Prefer `await mdl.get(path, ttl=..., auth=...)` / `post(...)` for ad-hoc calls
+to endpoints that aren't wrapped yet. Account endpoints require
+`MDL_USERNAME` + `MDL_PASSWORD` env vars, exactly like the HTTP server.
+
 ## 📚 API docs & playground
 
 `mdlaw` ships with the industry-standard docs out of the box (FastAPI built-ins — no extra setup):
