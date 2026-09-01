@@ -107,6 +107,7 @@ server needed). Works after `pip install mdlaw`:
 ```bash
 mdlaw --help                     # show all commands
 mdlaw auth                       # log in once, save session to ~/.mdlaw_auth.json
+mdlaw auth you@example.com hunter2   # one-liner login, no prompts
 mdlaw auth status                # show saved session (user, token expiry)
 mdlaw logout                     # remove the saved session
 mdlaw genres                     # all genres
@@ -123,12 +124,12 @@ mdlaw calendar                   # upcoming episodes
 ```
 
 Output is pretty-printed JSON. Auth-gated commands need a session — either
-log in once with `mdlaw auth` (prompts for credentials, saves to
-`~/.mdlaw_auth.json` chmod 600, then **reuses + auto-refreshes the token**),
-or set `MDL_USERNAME`/`MDL_PASSWORD` env vars:
+log in once with `mdlaw auth` (one-liner `mdlaw auth <user> <pass>` or
+prompts; saves to `~/.mdlaw_auth.json` chmod 600, then **reuses +
+auto-refreshes the token**), or set `MDL_USERNAME`/`MDL_PASSWORD` env vars:
 
 ```bash
-mdlaw auth
+mdlaw auth you@example.com hunter2   # one-liner, no prompts
 mdlaw me                         # uses the saved token — no env needed
 MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 mdlaw search "crash landing"
 ```

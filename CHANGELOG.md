@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-09-02
+
+### Added
+
+- `mdlaw auth` is now a one-liner: `mdlaw auth <user> <pass>` logs in with no
+  prompts. It also reads `MDL_USERNAME`/`MDL_PASSWORD` env vars, and only
+  falls back to interactive prompts when both are missing.
+
 ## [1.5.3] - 2026-09-02
 
 ### Fixed

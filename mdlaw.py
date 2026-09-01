@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -1088,8 +1088,10 @@ Usage:
   mdlaw [command] [args...]
 
 Commands:
-  auth                      Log in and save the session to ~/.mdlaw_auth.json
-                            (prompts for username/password). Later commands
+  auth                      Log in and save the session to ~/.mdlaw_auth.json.
+                            One-liner: `mdlaw auth <user> <pass>` (no prompts);
+                            also reads MDL_USERNAME/MDL_PASSWORD env vars, then
+                            falls back to interactive prompts. Later commands
                             reuse the saved token and auto-refresh it.
   auth status               Show saved session info (user, token expiry).
   logout                    Remove the saved session.
@@ -1197,7 +1199,11 @@ def _run_cli(args: list[str]) -> int:
 
 
 def _cli_auth(rest: list[str]) -> int:
-    """mdlaw auth [username] — log in and save the session."""
+    """mdlaw auth [username] [password] — log in and save the session.
+
+    One-liner: `mdlaw auth user pass` (no prompts), or fall back to env vars
+    MDL_USERNAME/MDL_PASSWORD, or prompt interactively when both are missing.
+    """
     import getpass
     import sys
 
@@ -1205,12 +1211,18 @@ def _cli_auth(rest: list[str]) -> int:
         return _cli_auth_status()
 
     username = rest[0] if rest else None
+    password = rest[1] if len(rest) > 1 else None
+    if not username:
+        username = os.environ.get("MDL_USERNAME", "").strip() or None
+    if not password:
+        password = os.environ.get("MDL_PASSWORD", "").strip() or None
     if not username:
         username = input("MDL username/email: ").strip()
     if not username:
         print("error: username required", file=sys.stderr)
         return 1
-    password = getpass.getpass("MDL password: ")
+    if not password:
+        password = getpass.getpass("MDL password: ")
 
     global MDL_USERNAME, MDL_PASSWORD
     MDL_USERNAME = username
