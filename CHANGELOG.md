@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-02
+
+### Added
+
+- **`MDL.search()` post-filters** — accepts `country`, `language`, `type`,
+  `media_type`, `year`, and `limit`, filtering results client-side. Upstream
+  has no server-side filters.
+- **`MDL.browse_by_genre(genre_id, limit=10, source=...)`** — fetches
+  candidate titles (search feed / trending / top_movies), loads each detail,
+  and returns only those whose `genres[]` include the requested genre_id.
+  One upstream title-detail call per candidate — keep `limit` small.
+
+### Changed
+
+- Documentation updated with live-verified findings (2026-09): upstream
+  `POST /search` currently **ignores `q` and all filter/pagination params** —
+  every query returns the identical 20-item default feed; no browse/discover/
+  filter endpoint exists (404/405). Search results carry
+  `country`/`language`/`type`/`media_type`/`year` but no `genres` field.
+
 ## [1.4.0] - 2026-09-02
 
 ### Added

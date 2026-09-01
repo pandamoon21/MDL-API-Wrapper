@@ -13,7 +13,7 @@ def test_key_optional():
     assert len(mdlaw.API_KEY) == 20
     if os.environ.get("MDL_API_KEY"):
         assert mdlaw.API_KEY == os.environ["MDL_API_KEY"].strip()
-    # default transport is httpx; curl_cffi is opt-in via env
+    # default transport is curl_cffi (TLS impersonation); httpx is opt-out
     assert mdlaw.TRANSPORT in ("httpx", "curl_cffi")
 
 
@@ -193,3 +193,56 @@ def test_saved_session_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
     mdl = mdlaw.MDL()
     assert mdlaw._auth["token"] == "tok123"
+
+
+def test_search_postfilter(monkeypatch):
+    # search() post-filters client-side on country/language/type/media_type/year
+    # (upstream has no server-side filters — verified live). Stub fetch offline.
+    feed = [
+        {"id": 1, "title": "A", "country": "South Korea", "language": "Korean",
+         "type": "Drama", "media_type": "Korean Drama", "year": 2024},
+        {"id": 2, "title": "B", "country": "China", "language": "Chinese",
+         "type": "Movie", "media_type": "Chinese Movie", "year": 2023},
+        {"id": 3, "title": "C", "country": "South Korea", "language": "Korean",
+         "type": "Drama", "media_type": "Korean Drama", "year": 2024},
+    ]
+    async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
+        return feed
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+
+    async def run():
+        mdl = mdlaw.MDL()
+        kr = await mdl.search(country="south korea")
+        assert len(kr) == 2 and all(i["country"] == "South Korea" for i in kr)
+        d24 = await mdl.search(type="drama", year=2024)
+        assert len(d24) == 2
+        lim = await mdl.search(country="south korea", limit=1)
+        assert len(lim) == 1
+        nohit = await mdl.search(country="Japan")
+        assert nohit == []
+    asyncio.run(run())
+
+
+def test_browse_by_genre(monkeypatch):
+    # browse_by_genre() fetches candidate titles' detail and keeps those whose
+    # genres[] include the requested genre_id. Stub fetch offline.
+    feed = [{"id": 1, "title": "A"}, {"id": 2, "title": "B"}, {"id": 3, "title": "C"}]
+    details = {
+        1: {"id": 1, "genres": [{"id": 1, "name": "Action"}, {"id": 5, "name": "Adventure"}]},
+        2: {"id": 2, "genres": [{"id": 13, "name": "Business"}]},
+        3: {"id": 3, "genres": [{"id": 1, "name": "Action"}]},
+    }
+    async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
+        if path.startswith("/titles/") and "expand" in path:
+            tid = int(path.split("/")[2].split("?")[0])
+            return details[tid]
+        return feed
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+
+    async def run():
+        mdl = mdlaw.MDL()
+        out = await mdl.browse_by_genre(1, limit=5)
+        assert [i["id"] for i in out] == [1, 3]  # only titles whose genres include id 1
+        out2 = await mdl.browse_by_genre(13, limit=5)
+        assert [i["id"] for i in out2] == [2]
+    asyncio.run(run())

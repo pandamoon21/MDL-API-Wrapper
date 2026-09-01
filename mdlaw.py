@@ -53,7 +53,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -931,8 +931,85 @@ class MDL:
         return await self.get(f"/titles/{tid}/credits", ttl=300, auth=True)
 
     # --- search (POST) ---
-    async def search(self, q: str) -> object:
-        return await self.post("/search", {"q": q, "synopsis": 1}, ttl=300, auth=True)
+    # NOTE: verified live (2026-09) — the upstream POST /search ignores `q`
+    # entirely and always returns the same default 20-item feed (no server-side
+    # filtering, no pagination). We keep the parameter for API compat and add
+    # client-side post-filtering on the fields search results DO carry
+    # (country, language, type, media_type, year).
+    async def search(self, q: str = "", country: str | None = None,
+                     language: str | None = None, type: str | None = None,
+                     media_type: str | None = None, year: int | None = None,
+                     limit: int | None = None) -> object:
+        """Search titles and optionally post-filter results client-side.
+
+        The upstream API has no server-side filters (verified live: q, genre_id,
+        language_id, page, limit, sort are all ignored — it always returns the
+        same 20 default items). Filters below are applied in Python to the fields
+        search results carry: ``country``, ``language``, ``type``, ``media_type``,
+        ``year``. Genre is NOT filterable here (search items have no genres field)
+        — use :meth:`browse_by_genre` instead.
+        """
+        results = await self.post("/search", {"q": q, "synopsis": 1},
+                                  ttl=300, auth=True)
+        if not isinstance(results, list):
+            return results
+        filtered = results
+        if country:
+            filtered = [it for it in filtered
+                        if (it.get("country") or "").lower() == country.lower()]
+        if language:
+            filtered = [it for it in filtered
+                        if (it.get("language") or "").lower() == language.lower()]
+        if type:
+            filtered = [it for it in filtered
+                        if (it.get("type") or "").lower() == type.lower()]
+        if media_type:
+            filtered = [it for it in filtered
+                        if (it.get("media_type") or "").lower() == media_type.lower()]
+        if year:
+            filtered = [it for it in filtered if it.get("year") == int(year)]
+        return filtered[:limit] if limit else filtered
+
+    async def browse_by_genre(self, genre_id: int, limit: int = 10,
+                              source: str = "search") -> list:
+        """Fetch titles and keep only those whose detail includes ``genre_id``.
+
+        The upstream API has no server-side genre filter, and search results
+        carry no genres field — the only place ``genres[]`` appears is the
+        title-detail endpoint. So this fetches each candidate's detail
+        (auth-gated) and filters client-side. ``source`` picks the candidate
+        pool: ``"search"`` (default feed), ``"trending"`` or ``"top_movies"``.
+        Each detail fetch is a separate upstream call — keep ``limit`` small.
+        """
+        pool: object
+        if source == "search":
+            pool = await self.search("")          # default feed (q ignored upstream)
+        elif source == "trending":
+            pool = await self.get(f"/titles/trending?limit={max(limit * 2, 10)}",
+                                  ttl=300, auth=True)
+        elif source == "top_movies":
+            pool = await self.get(f"/titles/top_movies?limit={max(limit * 2, 10)}",
+                                  ttl=300, auth=True)
+        else:
+            raise HTTPException(400, {"error": True, "code": 400,
+                                      "detail": "source must be 'search', 'trending' or 'top_movies'"})
+        candidates = pool if isinstance(pool, list) else (pool.get("items", []) if isinstance(pool, dict) else [])
+        out: list = []
+        for item in candidates:
+            tid = item.get("id") or item.get("rid")
+            if not tid:
+                continue
+            try:
+                detail = await self.title(tid)
+            except Exception:
+                continue
+            genres = detail.get("genres") or [] if isinstance(detail, dict) else []
+            gids = [g.get("id") for g in genres]
+            if genre_id in gids:
+                out.append(detail)
+                if len(out) >= limit:
+                    break
+        return out
 
     async def search_people(self, q: str) -> object:
         return await self.post("/search/people", {"q": q}, ttl=300, auth=True)

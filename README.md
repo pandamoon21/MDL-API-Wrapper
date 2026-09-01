@@ -243,18 +243,45 @@ below).
 
 ### Can I filter `search()` / `title()` by genre or language?
 
-**No — the upstream API does not support it.** We verified this live with an
-authenticated account:
+**No — the upstream API has no server-side filtering, and its search is
+currently broken.** We verified this live with an authenticated account
+(2026-09):
 
-- `POST /search` with `genre_id`, `genres`, `language_id`, `languages`,
-  `genre`, `type`, `page`, `limit`, or `sort` in the body → **all ignored**;
-  every response is the identical default 20 results.
+- `POST /search` **ignores `q` entirely** — `search("crash landing on you")`,
+  `search("zzz-nonexistent")`, and `search("romance")` all return the same
+  default 20-item feed (`Nana Tour with Seventeen`, `BTS in the Soop`, …).
+  Varying the body key (`q`, `query`, `keyword`, `search`), adding
+  `genre_id`/`genres`/`language_id`/`languages`/`page`/`limit`/`sort` — all
+  ignored. `POST /search/titles` behaves the same.
 - `GET /titles/{id}?genre_id=1`, `?genre=1`, `?language_id=462` → parameters
-  silently ignored; the same title detail is returned.
+  silently ignored.
+- Every browse/discover/filter path (`/titles/browse`, `/discover`,
+  `/titles/filter`, …) → **404/405**. No such endpoint exists.
 
-Search results carry `country`, `language`, `media_type`, `type`, and `year`
-but **no `genres` field**, so you cannot client-side filter search results by
-genre without fetching each title's detail.
+### Filtering client-side — `search()` post-filters + `browse_by_genre()`
+
+Because upstream won't filter, `mdlaw` does it in Python. Search results carry
+`country`, `language`, `type`, `media_type`, and `year` (but **no `genres`
+field**), so `search()` post-filters on those:
+
+```python
+await mdl.search(country="South Korea")                 # only Korean results
+await mdl.search(type="Drama", year=2024)               # Dramas from 2024
+await mdl.search(language="Chinese", media_type="Movie")  # Chinese movies
+await mdl.search(limit=5)                               # cap at 5 items
+```
+
+`q` is kept for API compatibility but does nothing upstream.
+
+Genre isn't filterable from search results, so `browse_by_genre()` fetches each
+candidate's detail (the only place `genres[]` appears) and keeps those matching:
+
+```python
+await mdl.browse_by_genre(1)                    # genre_id 1 = Action
+await mdl.browse_by_genre(13, source="top_movies", limit=5)
+# source: "search" (default feed) | "trending" | "top_movies"
+# each candidate = 1 upstream title-detail call — keep limit small
+```
 
 ### Where genre/language data *does* appear
 
@@ -265,10 +292,9 @@ genre without fetching each title's detail.
 | `search(q)` results | ❌ none | ✅ `language`, `country` |
 | `calendar()`, `trending`, `top_movies` | ❌ none | ✅ `country`, `language` |
 
-So the practical pattern is: use `genres()` to build your picker UI, then
-filter **server-side is impossible** — for a genre-filtered catalog, iterate
-`title(id)` details (each includes `genres[]`) or use `search()` and post-filter
-by `country`/`language`/`type`, which search results do carry.
+Practical pattern: use `genres()` to build a picker UI, `search()` to browse
+with country/language/type/year post-filters, and `browse_by_genre()` (or
+iterate `title(id)` details) when you specifically need genre filtering.
 
 ## 📚 API docs & playground
 
