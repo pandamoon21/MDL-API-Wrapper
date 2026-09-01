@@ -1,5 +1,12 @@
 # mdlaw
 
+![PyPI](https://img.shields.io/pypi/v/mdlaw)
+[![PyPI Downloads](https://static.pepy.tech/badge/mdlaw)](https://pepy.tech/projects/mdlaw)
+![GitHub Repo stars](https://img.shields.io/github/stars/pandamoon21/MDL-API-Wrapper?style=social)
+![GitHub forks](https://img.shields.io/github/forks/pandamoon21/MDL-API-Wrapper?style=social)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+
 **Blazing-fast unofficial API for [MyDramaList](https://mydramalist.com)**, powered by the **official MDL Android app API** (`app-api.mydramalist.com/v1`).
 
 Built from reverse-engineering `com.mydramalist.app` v2.3.18 (Flutter/Dio): the app's request header scheme, auth flow, and endpoint inventory were recovered and live-validated before this wrapper was written.
