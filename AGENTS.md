@@ -90,6 +90,11 @@ import time (no dotenv loader — set them in the shell or a process manager).
 - **Auth**: logs in once with env credentials (`POST /auth/login`, password
   MD5-hashed), decodes JWT `exp`, refreshes before expiry, re-logs in if
   refresh fails. 2FA is NOT supported (returns 428).
+- **Genres & languages are reference lists, not filters**: `GET /genres` and
+  `GET /languages/supported?v=2` return full catalogs. The upstream
+  `POST /search` **ignores** `genre_id`/`genres`/`language_id`/`languages`/
+  `page`/`limit`/`sort` (verified live — identical 20 results) and search
+  items carry no `genres` field; only `title(id)` detail has `genres[]`.
 
 ## Conventions & pitfalls
 

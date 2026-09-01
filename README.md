@@ -207,6 +207,69 @@ Prefer `await mdl.get(path, ttl=..., auth=...)` / `post(...)` for ad-hoc calls
 to endpoints that aren't wrapped yet. Account endpoints require
 `MDL_USERNAME` + `MDL_PASSWORD` env vars, exactly like the HTTP server.
 
+## 🎯 Genres & languages — reference data (not filters)
+
+`genres()` and `languages()` are **reference lists**, not query filters. They
+return every genre / language MyDramaList knows, which is useful for building
+dropdowns, badges, or localized UI. They are **not** accepted as parameters by
+`search()` or `title()` — the upstream API ignores them (verified live, see
+below).
+
+**`await mdl.genres()`** → list of 35 genres:
+
+```python
+[
+  {"id": 1, "name": "Action", "slug": "action"},
+  {"id": 5, "name": "Adventure", "slug": "adventure"},
+  {"id": 13, "name": "Business", "slug": "business"},
+  # ... 35 total
+]
+```
+
+**`await mdl.languages()`** → dict with `languages[]` (39 supported):
+
+```python
+{
+  "country": "ID",
+  "default_language": {"mobile": "en-US", "web": "en-US"},
+  "language": "id",
+  "languages": [
+    {"id": 462, "code": "ar", "iso_code": "SA", "name": "Arabic",
+     "native_name": "Arabic", "i18n": false, "i18n_web": false},
+    # ... 39 total
+  ]
+}
+```
+
+### Can I filter `search()` / `title()` by genre or language?
+
+**No — the upstream API does not support it.** We verified this live with an
+authenticated account:
+
+- `POST /search` with `genre_id`, `genres`, `language_id`, `languages`,
+  `genre`, `type`, `page`, `limit`, or `sort` in the body → **all ignored**;
+  every response is the identical default 20 results.
+- `GET /titles/{id}?genre_id=1`, `?genre=1`, `?language_id=462` → parameters
+  silently ignored; the same title detail is returned.
+
+Search results carry `country`, `language`, `media_type`, `type`, and `year`
+but **no `genres` field**, so you cannot client-side filter search results by
+genre without fetching each title's detail.
+
+### Where genre/language data *does* appear
+
+| Source | Genre | Language |
+|---|---|---|
+| `genres()` / `languages()` | ✅ full list | ✅ full list |
+| `title(id)` detail (`?expand=1`) | ✅ `genres[]` (`{id, name, slug, ...}`) | ✅ `language` + `country` |
+| `search(q)` results | ❌ none | ✅ `language`, `country` |
+| `calendar()`, `trending`, `top_movies` | ❌ none | ✅ `country`, `language` |
+
+So the practical pattern is: use `genres()` to build your picker UI, then
+filter **server-side is impossible** — for a genre-filtered catalog, iterate
+`title(id)` details (each includes `genres[]`) or use `search()` and post-filter
+by `country`/`language`/`type`, which search results do carry.
+
 ## 📚 API docs & playground
 
 `mdlaw` ships with the industry-standard docs out of the box (FastAPI built-ins — no extra setup):
@@ -308,6 +371,25 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
   { "id": 13, "name": "Business", "slug": "business" }
 ]
 ```
+
+**`GET /api/v1/languages`** → `200` · `Cache-Control: public, max-age=3600`
+
+```json
+{
+  "country": "ID",
+  "default_language": { "mobile": "en-US", "web": "en-US" },
+  "language": "id",
+  "languages": [
+    { "id": 462, "code": "ar", "iso_code": "SA", "name": "Arabic",
+      "native_name": "Arabic", "i18n": false, "i18n_web": false }
+  ]
+}
+```
+
+> ℹ️ **Genres & languages are reference lists, not search filters.** The
+> upstream `POST /search` ignores `genre_id` / `language_id` / `genres` /
+> `languages` / `page` / `limit` / `sort` (verified live) — it always returns
+> the same 20 default results. See [🎯 Genres & languages](#-genres--languages--reference-data-not-filters).
 
 **`GET /api/v1/people/6997`** → `200`
 
