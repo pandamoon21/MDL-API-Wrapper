@@ -539,6 +539,7 @@ mdlaw/
 ├── pyproject.toml      # PyPI packaging (pip install mdlaw → console script)
 ├── LICENSE             # MIT
 ├── AGENTS.md           # AI-agent / dev instructions (install, verify, extend, pitfalls)
+├── CHANGELOG.md        # version history (Keep a Changelog convention)
 ├── api/index.py        # Vercel serverless entrypoint
 ├── vercel.json         # Vercel config (rewrites, function limits)
 ├── requirements.txt    # fastapi, uvicorn[standard], httpx
