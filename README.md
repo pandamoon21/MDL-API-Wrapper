@@ -105,25 +105,36 @@ Interactive docs (Swagger UI): **http://localhost:8000/docs**
 server needed). Works after `pip install mdlaw`:
 
 ```bash
+mdlaw --help                     # show all commands
+mdlaw auth                       # log in once, save session to ~/.mdlaw_auth.json
+mdlaw auth status                # show saved session (user, token expiry)
+mdlaw logout                     # remove the saved session
 mdlaw genres                     # all genres
-mdlaw search "crash landing"     # search titles (requires credentials)
-mdlaw search-people "lee minho"  # search people (requires credentials)
-mdlaw title 686                  # title detail (requires credentials)
+mdlaw search "crash landing"     # search titles (requires auth)
+mdlaw search-people "lee minho"  # search people (requires auth)
+mdlaw title 686                  # title detail (requires auth)
 mdlaw people 12345               # actor/crew profile
-mdlaw watchlist completed        # your watchlist (requires credentials)
-mdlaw watchlist                  # full watchlist (requires credentials)
-mdlaw me                         # your profile (requires credentials)
+mdlaw watchlist completed        # your watchlist (requires auth)
+mdlaw watchlist                  # full watchlist (requires auth)
+mdlaw me                         # your profile (requires auth)
 mdlaw leaderboard weekly         # period: alltime | weekly | monthly
 mdlaw languages                  # supported languages
 mdlaw calendar                   # upcoming episodes
 ```
 
-Output is pretty-printed JSON. Auth-gated commands use the same credentials
-as the library: `MDL_USERNAME`/`MDL_PASSWORD` env vars, or pass them inline:
+Output is pretty-printed JSON. Auth-gated commands need a session — either
+log in once with `mdlaw auth` (prompts for credentials, saves to
+`~/.mdlaw_auth.json` chmod 600, then **reuses + auto-refreshes the token**),
+or set `MDL_USERNAME`/`MDL_PASSWORD` env vars:
 
 ```bash
+mdlaw auth
+mdlaw me                         # uses the saved token — no env needed
 MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 mdlaw search "crash landing"
 ```
+
+The CLI defaults to the `curl_cffi` transport (passes Cloudflare from flagged
+IPs); override with `--transport httpx` if you prefer.
 
 Errors print a clean `error: ...` message to stderr with exit code 1 — no
 tracebacks.
@@ -155,7 +166,7 @@ asyncio.run(main())
 ### Authenticating as a package
 
 Account endpoints (`title()`, `search()`, `watchlist()`, `me()`, …) need
-credentials. Two ways — same auto-login + auto-refresh behavior:
+credentials. Three ways — same auto-login + auto-refresh behavior:
 
 **1. Constructor (recommended for library use):**
 
@@ -170,10 +181,21 @@ me = await mdl.me()     # logs in automatically on first auth-gated call
 MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 python app.py
 ```
 
+**3. Saved CLI session** — if you already ran `mdlaw auth`, the constructor
+reuses `~/.mdlaw_auth.json` automatically (no credentials needed):
+
+```python
+mdl = MDL()             # auto-loads the session saved by `mdlaw auth`
+me = await mdl.me()     # uses the saved token, auto-refreshes when expired
+```
+
 > ⚠️ Env vars are read at import time. Setting `os.environ[...]` after
 > `import mdlaw` has no effect — use the constructor instead for dynamic
-> credentials. Both paths share the token cache, so calling `me()` twice
-> logs in once. 2FA accounts are not supported (428).
+> credentials. Tokens live in an in-memory `_auth` dict while the process
+> runs; `mdlaw auth` additionally persists them to `~/.mdlaw_auth.json`
+> (chmod 600) so CLI and library calls across processes reuse them. Both
+> paths share the token cache, so calling `me()` twice logs in once. 2FA
+> accounts are not supported (428).
 
 Every `MDL` method maps to a route: `genres()`, `languages()`, `calendar()`,
 `articles_featured()`, `lists_featured()`, `lists_popular()`, `leaderboard()`,
@@ -352,7 +374,7 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 
 ## ⚡ Performance
 
-- **Async + connection pooling** — one `httpx.AsyncClient` reuses TCP/TLS connections.
+- **Async + connection pooling** — one `httpx.AsyncClient` / `curl_cffi.AsyncSession` reuses TCP/TLS connections.
 - **TTL cache in-memory** — repeat requests never hit upstream. Measured:
   - Cold (first hit): **~0.5 s**
   - Warm (cached): **~1 ms**
@@ -420,7 +442,7 @@ Everything `mdlaw` needs is set via environment variables. Here's the full pictu
 | Variable | Required? | What it does | Default |
 |---|---|---|---|
 | `MDL_API_KEY` | No | Pin a fixed `mdl-api-key` (client nonce; optional, no security meaning) | generated nonce |
-| `MDL_TRANSPORT` | No | `httpx` (plain TLS) or `curl_cffi` (TLS impersonation, passes Cloudflare challenge) | `httpx` |
+| `MDL_TRANSPORT` | No | `curl_cffi` (TLS impersonation, default) or `httpx` (plain TLS) | `curl_cffi` |
 | `MDL_USERNAME` | No | Enables auth-gated endpoints (title detail, search, watchlist, `/me`) | disabled |
 | `MDL_PASSWORD` | No | Password for the account above (paired with `MDL_USERNAME`) | disabled |
 | `MDL_CACHE_BACKEND` | No | `memory` · `sqlite` · `mysql` · `postgres` | `memory` |
@@ -442,17 +464,23 @@ and just works. Set `MDL_API_KEY` only if you want reproducible requests.
 uvicorn mdlaw:app --port 8000   # no env needed — works out of the box
 ```
 
-### 🔀 Transport (optional)
+### 🔀 Transport
 
-From most residential IPs, plain `httpx` with the app's header scheme passes.
-If Cloudflare serves you a `403 "Just a moment..."` challenge (common on
-datacenter/flagged IPs), switch to the `curl_cffi` transport, which
-impersonates a real browser/mobile TLS fingerprint:
+The default transport is `curl_cffi`, which impersonates a real
+browser/mobile TLS fingerprint (`safari_ios`) and passes Cloudflare's JA3/JA4
+bot protection — this is what lets `mdlaw` work from datacenter/flagged IPs
+where a plain TLS stack gets a `403 "Just a moment..."` challenge. It is
+installed by default (`pip install mdlaw`).
+
+If you're on a normal residential IP and want a lighter stack, switch to
+plain `httpx`:
 
 ```bash
-pip install curl_cffi
-MDL_TRANSPORT=curl_cffi uvicorn mdlaw:app --port 8000
+MDL_TRANSPORT=httpx uvicorn mdlaw:app --port 8000
 ```
+
+> `httpx` is still a dependency (used for the fallback path); the `curl_cffi`
+> package itself is the default client. Both share the same header scheme.
 
 ### 👤 Account (optional)
 
@@ -505,7 +533,7 @@ required env var.
 | Env | Public build |
 |---|---|
 | `MDL_API_KEY` | optional (pin a nonce for reproducible requests) |
-| `MDL_TRANSPORT` | optional (`curl_cffi` for Cloudflare-challenged IPs) |
+| `MDL_TRANSPORT` | optional (`curl_cffi` default, `httpx` to opt out) |
 | `MDL_USERNAME` + `MDL_PASSWORD` | optional (auth-gated endpoints) |
 | `MDL_CACHE_BACKEND` + `MDL_CACHE_DB_URL` | optional (persistent cache) |
 
@@ -656,14 +684,14 @@ mdlaw/
 ├── CHANGELOG.md        # version history (Keep a Changelog convention)
 ├── api/index.py        # Vercel serverless entrypoint
 ├── vercel.json         # Vercel config (rewrites, function limits)
-├── requirements.txt    # fastapi, uvicorn[standard], httpx
+├── requirements.txt    # fastapi, uvicorn[standard], httpx, curl_cffi
 ├── Dockerfile          # python:3.12-slim, non-root
 ├── docker-compose.yml  # one-command production deploy (with healthcheck)
 ├── fly.toml            # Fly.io config (port 8000, region sin, always-on)
 ├── pytest.ini          # pythonpath for tests
 ├── .env.example        # API key + account + cache backend placeholders
 ├── tests/
-│   └── test_mdlaw.py   # 8 offline checks
+│   └── test_mdlaw.py   # 14 offline checks
 └── README.md
 ```
 

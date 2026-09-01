@@ -7,11 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-02
+
+### Added
+
+- **CLI auth session**: `mdlaw auth` prompts for credentials, logs in, and
+  saves the session to `~/.mdlaw_auth.json` (chmod 600). Later CLI commands
+  and `MDL()` library calls reuse the saved token and auto-refresh it.
+  `mdlaw auth status` shows the saved session; `mdlaw logout` removes it.
+- **CLI help**: `mdlaw -h` / `mdlaw --help` lists all commands and options.
+- `MDL()` constructor auto-loads the session saved by `mdlaw auth` when no
+  env credentials are set.
+
+### Changed
+
+- **`curl_cffi` is now the default transport** everywhere (CLI, library,
+  server) — browser/mobile TLS impersonation passes Cloudflare's JA3/JA4
+  challenge from flagged/datacenter IPs. It is now a required dependency
+  (`pip install mdlaw` includes it). Set `MDL_TRANSPORT=httpx` to use a
+  plain httpx TLS stack.
+- CLI defaults to `curl_cffi` unless `MDL_TRANSPORT` or `--transport` says
+  otherwise.
+
 ### Fixed
 
 - Cloudflare "Just a moment..." 403 challenge now returns a clear,
-  actionable message (suggests `MDL_TRANSPORT=curl_cffi`) instead of dumping
-  raw HTML.
+  actionable message (suggests the default `curl_cffi` transport) instead of
+  dumping raw HTML.
 
 ## [1.3.0] - 2026-09-02
 

@@ -47,9 +47,13 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # flagged IPs Cloudflare serves a "403 Just a moment..." challenge to plain
 # TLS stacks. Set MDL_TRANSPORT=curl_cffi to use curl_cffi's impersonation
 # (e.g. safari_ios) which passes the challenge.
-TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
+# Transport. Default is curl_cffi (browser/mobile TLS impersonation), which
+# passes Cloudflare's JA3/JA4 bot protection from flagged/datacenter IPs.
+# Set MDL_TRANSPORT=httpx to use a plain httpx TLS stack (lighter, no
+# curl_cffi dependency) — works from most residential IPs.
+TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -315,13 +319,19 @@ def _url(path: str) -> str:
 
 
 def get_client() -> httpx.AsyncClient | Any:
-    """Return the shared upstream client. Default transport is httpx (plain
-    TLS); set MDL_TRANSPORT=curl_cffi to use curl_cffi's browser/mobile TLS
-    impersonation (passes Cloudflare's JA3/JA4 challenge from flagged IPs)."""
+    """Return the shared upstream client. Default transport is curl_cffi
+    (browser/mobile TLS impersonation — passes Cloudflare's JA3/JA4 challenge
+    from flagged IPs). Set MDL_TRANSPORT=httpx to use a plain httpx TLS stack."""
     global _client, _cffi
     if TRANSPORT == "curl_cffi":
         if _cffi is None:
-            from curl_cffi.requests import AsyncSession
+            try:
+                from curl_cffi.requests import AsyncSession
+            except ImportError:
+                raise RuntimeError(
+                    "MDL_TRANSPORT=curl_cffi (the default) requires the curl_cffi "
+                    "package: pip install curl_cffi  (or set MDL_TRANSPORT=httpx)"
+                ) from None
             _cffi = AsyncSession(impersonate="safari_ios", headers=default_headers())
         return _cffi
     if _client is None or _client.is_closed:
@@ -493,6 +503,7 @@ async def login(force: bool = False) -> dict:
         _set_tokens(data)
         _auth["login_error"] = None
         _auth["last_login"] = time.time()
+        _save_auth()
         return _auth
 
 
@@ -530,6 +541,7 @@ async def refresh() -> dict:
             _auth["last_refresh"] = time.time()
             _auth["refreshes"] += 1
             _REFRESHED = True
+            _save_auth()
         except HTTPException:
             _REFRESHED = False
             return await login(force=True)
@@ -541,8 +553,52 @@ async def auth_headers() -> dict[str, str]:
     if not auth_enabled():
         return default_headers()
     if not _auth["token"] or _auth["expires_at"] <= time.time() + 60:
-        await login()
+        if _auth["refresh_token"]:
+            await refresh()
+        else:
+            await login()
     return default_headers(token=_auth["token"])
+
+
+# Saved CLI session — `mdlaw auth` stores the token so later commands reuse it.
+_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".mdlaw_auth.json")
+
+
+def _save_auth() -> None:
+    """Persist the current session to ~/.mdlaw_auth.json (chmod 600)."""
+    data = {
+        "token": _auth["token"],
+        "refresh_token": _auth["refresh_token"],
+        "device_id": _auth["device_id"],
+        "expires_at": _auth["expires_at"],
+        "user": _auth["user"],
+    }
+    with open(_AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    try:
+        os.chmod(_AUTH_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _load_auth() -> bool:
+    """Load a saved CLI session; returns True if a session was restored.
+    Marks credentials as configured (dummy values) so auth_enabled() is True
+    while the saved token/refresh_token drive the actual requests."""
+    global MDL_USERNAME, MDL_PASSWORD
+    try:
+        with open(_AUTH_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    _auth.update({k: data[k] for k in
+                  ("token", "refresh_token", "device_id", "expires_at", "user")
+                  if k in data})
+    if not MDL_USERNAME:
+        MDL_USERNAME = "saved"
+    if not MDL_PASSWORD:
+        MDL_PASSWORD = "saved"
+    return True
 app = FastAPI(
     title="mdlaw — MyDramaList API Wrapper",
     version="1.0.0",
@@ -632,7 +688,7 @@ async def dashboard() -> dict:
     return {
         "status": "ok",
         "service": "mdlaw",
-        "version": "1.0.0",
+        "version": __version__,
         "uptime_seconds": int(time.time() - _START),
         "cache": {
             "hits": cache.hits,
@@ -815,6 +871,9 @@ class MDL:
             global MDL_USERNAME, MDL_PASSWORD
             MDL_USERNAME = (username or "").strip()
             MDL_PASSWORD = (password or "").strip()
+        # No env credentials → reuse a session saved by `mdlaw auth`.
+        if not auth_enabled() and not _auth["token"]:
+            _load_auth()
 
     async def get(self, path: str, ttl: float = 3600, auth: bool = False) -> object:
         return await fetch("GET", path, ttl=ttl, auth=auth)
@@ -940,12 +999,76 @@ def self_check() -> int:
     return 0
 
 
+_CLI_USAGE = """\
+mdlaw — MyDramaList API wrapper CLI
+
+Usage:
+  mdlaw [command] [args...]
+
+Commands:
+  auth                      Log in and save the session to ~/.mdlaw_auth.json
+                            (prompts for username/password). Later commands
+                            reuse the saved token and auto-refresh it.
+  auth status               Show saved session info (user, token expiry).
+  logout                    Remove the saved session.
+  genres                    List all genres.
+  languages                 List supported languages.
+  calendar                  Upcoming episodes.
+  search <query>            Search titles (requires auth).
+  search-people <name>      Search people (requires auth).
+  title <id>                Title detail (requires auth).
+  people <id>               Actor/crew profile.
+  watchlist [status]        Your watchlist (requires auth).
+  me                        Your profile (requires auth).
+  leaderboard [period]      Period: alltime | weekly | monthly.
+  self                      Offline self-check.
+  serve | run               Start the HTTP server (default when no command).
+
+Options:
+  -h, --help                Show this help.
+  --transport <httpx|curl_cffi>   Transport override (CLI default: curl_cffi).
+
+Environment:
+  MDL_USERNAME / MDL_PASSWORD     Account credentials (alternative to `auth`).
+  MDL_TRANSPORT                   Transport for the server / library
+                                  (default: httpx there; CLI defaults to curl_cffi).
+"""
+
+
 def _run_cli(args: list[str]) -> int:
     """One-shot data commands: mdlaw genres, mdlaw search 'q', mdlaw title 686 ..."""
     import asyncio
     import json as _json
+    import sys
+
+    # CLI defaults to curl_cffi (passes Cloudflare from flagged IPs) unless the
+    # user explicitly overrides with --transport or MDL_TRANSPORT.
+    global TRANSPORT
+    if not os.environ.get("MDL_TRANSPORT"):
+        TRANSPORT = "curl_cffi"
+    if args and args[0] == "--transport":
+        if len(args) < 2:
+            print("error: --transport requires httpx or curl_cffi", file=sys.stderr)
+            return 1
+        TRANSPORT = args[1].lower()
+        args = args[2:]
+    if args and args[0] in ("-h", "--help"):
+        print(_CLI_USAGE)
+        return 0
+    if not args:
+        print(_CLI_USAGE)
+        return 0
 
     cmd, rest = args[0], args[1:]
+
+    if cmd == "auth":
+        return _cli_auth(rest)
+    if cmd == "logout":
+        return _cli_logout()
+
+    # Load the saved session for auth-gated commands.
+    if not auth_enabled():
+        _load_auth()
 
     async def call():
         mdl = MDL()
@@ -985,10 +1108,70 @@ def _run_cli(args: list[str]) -> int:
     try:
         data = asyncio.run(call())
     except HTTPException as e:
-        import sys
         print(f"error: {e.detail}", file=sys.stderr)
         return 1
     print(_json.dumps(data, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cli_auth(rest: list[str]) -> int:
+    """mdlaw auth [username] — log in and save the session."""
+    import getpass
+    import sys
+
+    if rest and rest[0] == "status":
+        return _cli_auth_status()
+
+    username = rest[0] if rest else None
+    if not username:
+        username = input("MDL username/email: ").strip()
+    if not username:
+        print("error: username required", file=sys.stderr)
+        return 1
+    password = getpass.getpass("MDL password: ")
+
+    global MDL_USERNAME, MDL_PASSWORD
+    MDL_USERNAME = username
+    MDL_PASSWORD = password
+
+    async def do_login():
+        try:
+            await login(force=True)
+            return True
+        except HTTPException as e:
+            print(f"error: {e.detail}", file=sys.stderr)
+            return False
+        finally:
+            await close_client()
+
+    if not asyncio.run(do_login()):
+        return 1
+    print(f"logged in as {username}; session saved to {_AUTH_FILE}")
+    return 0
+
+
+def _cli_auth_status() -> int:
+    """Show saved session info."""
+    if not _load_auth() or not _auth["token"]:
+        print("not logged in (run `mdlaw auth`)")
+        return 0
+    user = _auth["user"] if isinstance(_auth["user"], dict) else {}
+    name = user.get("name") or user.get("username") or ""
+    remaining = max(0, int(_auth["expires_at"] - time.time()))
+    print(f"logged in as: {name}")
+    print(f"token expires in: {remaining // 3600}h {remaining % 3600 // 60}m")
+    print(f"device_id: {_auth['device_id']}")
+    print(f"session file: {_AUTH_FILE}")
+    return 0
+
+
+def _cli_logout() -> int:
+    """Remove the saved session."""
+    try:
+        os.remove(_AUTH_FILE)
+        print("logged out; session file removed")
+    except OSError:
+        print("no saved session")
     return 0
 
 

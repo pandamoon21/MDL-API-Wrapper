@@ -39,19 +39,19 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 8 passed
+python3 -m pytest tests/ -q      # expect: 14 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/test_mdlaw.py # 8 offline checks (no network)
+tests/test_mdlaw.py # 14 offline checks (no network)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
 Dockerfile          # python:3.12-slim, non-root
 fly.toml            # Fly.io config
-requirements.txt    # fastapi, uvicorn[standard], httpx (+ optional DB drivers)
+requirements.txt    # fastapi, uvicorn[standard], httpx, curl_cffi (+ optional DB drivers)
 .env.example        # all env vars documented
 pytest.ini          # pythonpath = .
 ```
@@ -61,7 +61,7 @@ pytest.ini          # pythonpath = .
 | Var | Purpose | Required | Default |
 |---|---|---|---|
 | `MDL_API_KEY` | Pin a fixed `mdl-api-key` (client nonce — optional, no security meaning) | no | generated nonce |
-| `MDL_TRANSPORT` | `httpx` (plain TLS) or `curl_cffi` (TLS impersonation, passes Cloudflare challenge) | no | `httpx` |
+| `MDL_TRANSPORT` | `curl_cffi` (TLS impersonation, default) or `httpx` (plain TLS) | no | `curl_cffi` |
 | `MDL_USERNAME` + `MDL_PASSWORD` | Enable auth-gated endpoints (title detail, search, watchlist, /me) | no | disabled |
 | `MDL_CACHE_BACKEND` | `memory` \| `sqlite` \| `mysql` \| `postgres` | no | `memory` |
 | `MDL_CACHE_DB_URL` | DSN for SQL backends, e.g. `sqlite:///mdlaw_cache.db` | only if backend ≠ memory | — |
@@ -78,12 +78,10 @@ import time (no dotenv loader — set them in the shell or a process manager).
   generates per launch; the server never validates it (verified live — no
   header, real key, and random values all return 200). `mdlaw` generates one
   automatically.
-- **Transport**: default is `httpx` (plain TLS), which passes from most
-  residential IPs. The real gate is Cloudflare bot protection (TLS/JA3
-  fingerprint); from flagged/datacenter IPs it serves a `403 "Just a
-  moment..."` challenge to plain TLS stacks. Set `MDL_TRANSPORT=curl_cffi`
-  (with `pip install curl_cffi`) to impersonate a browser/mobile TLS
-  fingerprint and pass the challenge.
+- **Transport**: default is `curl_cffi` (browser/mobile TLS impersonation —
+  passes Cloudflare's JA3/JA4 challenge from flagged/datacenter IPs). Set
+  `MDL_TRANSPORT=httpx` for a plain TLS stack (lighter; works from most
+  residential IPs). `curl_cffi` is installed by default.
 - **Throttle**: outbound is limited (2 concurrent, 0.5 s min interval) — the
   WAF soft-blocks bursts. Never remove this.
 - **Cache**: `TTLCache` (memory) or `SQLCache` (sqlite/mysql/postgres). Stored
@@ -107,11 +105,13 @@ import time (no dotenv loader — set them in the shell or a process manager).
   sanity check (headers, cache, MD5 formula, SQL change detection).
 - **Keep tests offline** — `tests/` must never hit the network.
 - **Single-file rule** — new endpoints go in `mdlaw.py` unless there's a real
-  reason to split. Avoid adding dependencies; `fastapi` + `httpx` + stdlib
-  cover 99% of needs. Optional DB drivers (`pymysql`, `psycopg`) and
-  `curl_cffi` stay optional.
+  reason to split. Avoid adding dependencies; `fastapi` + `httpx` + `curl_cffi`
+  + stdlib cover 99% of needs. Optional DB drivers (`pymysql`, `psycopg`) stay
+  optional.
 - **Auth-gated endpoints** need `auth=True` in the `fetch()` call; without
   credentials they return a clear 400 (handled centrally in `fetch`).
+- **CLI session**: `mdlaw auth` saves to `~/.mdlaw_auth.json` (chmod 600);
+  `MDL()` and later CLI calls auto-load it. Don't commit that file.
 
 ## Deploy
 

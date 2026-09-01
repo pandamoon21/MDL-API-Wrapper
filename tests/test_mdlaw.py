@@ -1,6 +1,8 @@
 """Offline self-checks for mdlaw (no network). Run: python -m pytest tests/"""
 import asyncio
 import os
+import time
+import uuid
 
 import mdlaw
 
@@ -153,3 +155,41 @@ def test_mdl_constructor_auth(monkeypatch):
     # reset so other tests aren't affected
     mdlaw.MDL_USERNAME = ""
     mdlaw.MDL_PASSWORD = ""
+
+
+def test_saved_session_roundtrip(monkeypatch, tmp_path):
+    # `mdlaw auth` saves to ~/.mdlaw_auth.json; _load_auth() restores it so
+    # later CLI/library calls reuse the token + refresh_token. Deterministic
+    # via tmp_path + monkeypatch.
+    auth_file = tmp_path / ".mdlaw_auth.json"
+    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
+
+    mdlaw._auth.update({
+        "token": "tok123",
+        "refresh_token": "ref456",
+        "device_id": "dev789",
+        "expires_at": time.time() + 3600,
+        "user": {"name": "Tester"},
+    })
+    mdlaw._save_auth()
+    assert auth_file.exists()
+
+    # simulate a fresh process: clear in-memory state + credentials
+    mdlaw._auth.update({"token": None, "refresh_token": None,
+                        "device_id": str(uuid.uuid4()), "expires_at": 0.0,
+                        "user": None})
+    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
+    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
+    assert mdlaw._load_auth() is True
+    assert mdlaw._auth["token"] == "tok123"
+    assert mdlaw._auth["refresh_token"] == "ref456"
+    assert mdlaw.auth_enabled() is True  # dummy creds → auth enabled
+
+    # MDL() constructor auto-loads the saved session too
+    mdlaw._auth.update({"token": None, "refresh_token": None,
+                        "device_id": str(uuid.uuid4()), "expires_at": 0.0,
+                        "user": None})
+    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
+    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
+    mdl = mdlaw.MDL()
+    assert mdlaw._auth["token"] == "tok123"
