@@ -115,6 +115,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### Authenticating as a package
+
+Account endpoints (`title()`, `search()`, `watchlist()`, `me()`, …) need
+credentials. Two ways — same auto-login + auto-refresh behavior:
+
+**1. Constructor (recommended for library use):**
+
+```python
+mdl = MDL(username="you@example.com", password="hunter2")
+me = await mdl.me()     # logs in automatically on first auth-gated call
+```
+
+**2. Env vars** (set before `import mdlaw`, or in your process manager):
+
+```bash
+MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 python app.py
+```
+
+> ⚠️ Env vars are read at import time. Setting `os.environ[...]` after
+> `import mdlaw` has no effect — use the constructor instead for dynamic
+> credentials. Both paths share the token cache, so calling `me()` twice
+> logs in once. 2FA accounts are not supported (428).
+
 Every `MDL` method maps to a route: `genres()`, `languages()`, `calendar()`,
 `articles_featured()`, `lists_featured()`, `lists_popular()`, `leaderboard()`,
 `people()`, `payment_plans()`, `payment_coins()`, `title()`,

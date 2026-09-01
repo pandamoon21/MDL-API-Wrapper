@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without the HTTP server (`from mdlaw import MDL; await mdl.genres()`). All
   methods share the same cache, throttle, auth and transport. See README
   "Use as a Python package".
+- `MDL(username=..., password=...)` — authenticate as a library directly in
+  the constructor (alternative to `MDL_USERNAME`/`MDL_PASSWORD` env vars,
+  which are read at import time). Auto-login + auto-refresh unchanged.
 
 ### Changed
 

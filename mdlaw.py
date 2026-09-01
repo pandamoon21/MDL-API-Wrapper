@@ -49,7 +49,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (e.g. safari_ios) which passes the challenge.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -798,10 +798,15 @@ class MDL:
     and transport. Construct once, call many, `await mdl.close()` at exit.
     """
 
-    def __init__(self, transport: str | None = None):
+    def __init__(self, transport: str | None = None,
+                 username: str | None = None, password: str | None = None):
         if transport:
             global TRANSPORT
             TRANSPORT = transport
+        if username is not None or password is not None:
+            global MDL_USERNAME, MDL_PASSWORD
+            MDL_USERNAME = (username or "").strip()
+            MDL_PASSWORD = (password or "").strip()
 
     async def get(self, path: str, ttl: float = 3600, auth: bool = False) -> object:
         return await fetch("GET", path, ttl=ttl, auth=auth)

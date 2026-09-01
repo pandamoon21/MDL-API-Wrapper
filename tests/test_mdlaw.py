@@ -122,7 +122,6 @@ def test_mdl_library_layer(monkeypatch):
             pass  # invalid status → HTTPException
         return mdl
     asyncio.run(run())
-
     expected = [
         ("GET", "/genres", 3600, False, None),
         ("GET", "/titles/686?expand=1", 300, True, None),
@@ -132,3 +131,15 @@ def test_mdl_library_layer(monkeypatch):
         ("GET", "/users/me", 60, True, None),
     ]
     assert calls == expected, calls
+
+
+def test_mdl_constructor_auth(monkeypatch):
+    # MDL(username=..., password=...) sets the module-level credentials used by
+    # login()/auth_headers(). Verify without network.
+    mdl = mdlaw.MDL(username="user@example.com", password="s3cret")
+    assert mdlaw.MDL_USERNAME == "user@example.com"
+    assert mdlaw.MDL_PASSWORD == "s3cret"
+    assert mdlaw.auth_enabled() is True
+    # reset so other tests aren't affected
+    mdlaw.MDL_USERNAME = ""
+    mdlaw.MDL_PASSWORD = ""
