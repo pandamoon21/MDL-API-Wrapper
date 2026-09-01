@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdlaw"
+version = "1.0.0"
+description = "Blazing-fast unofficial MyDramaList API wrapper (FastAPI + httpx, official MDL Android app API)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pandamoon21" }]
+keywords = ["mydramalist", "mdl", "drama", "k-drama", "api", "wrapper", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+mysql = ["pymysql>=1.1"]
+postgres = ["psycopg[binary]>=3.1"]
+
+[project.scripts]
+mdlaw = "mdlaw:main"
+
+[tool.setuptools]
+py-modules = ["mdlaw"]

@@ -1,0 +1,801 @@
+#!/usr/bin/env python3
+"""
+mdlaw — blazing-fast MyDramaList API wrapper.
+
+Sources data from the official MDL Android app API (app-api.mydramalist.com/v1),
+reconstructed from reversing com.mydramalist.app v2.3.18.
+
+Run:  uvicorn mdlaw:app --port 8000
+Self-check:  python mdlaw.py self   (offline)
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import time
+import uuid
+
+import httpx
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+
+# ---------------------------------------------------------------------------
+# Config / obfuscation
+# ---------------------------------------------------------------------------
+API_BASE = "https://app-api.mydramalist.com/v1"
+
+# Public build: the MDL API key is NOT in the source. You MUST provide it
+# via the MDL_API_KEY env var. Import is safe without it (so `pip install
+# mdlaw` + `import mdlaw` works); the server refuses to START without it
+# (checked in lifespan startup) and the CLI self-check requires it.
+API_KEY = os.environ.get("MDL_API_KEY", "").strip()
+
+__version__ = "1.0.0"
+
+# Header scheme recovered from RequestHeaders.json() — validated: without
+# User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
+def default_headers(token: str | None = None) -> dict[str, str]:
+    h = {
+        "Content-Type": "application/json",
+        "mdl-api-key": API_KEY,
+        "device": "android",
+        "X-Client-Platform": "mobile",
+        "X-Client-App": "mdl_flutter",
+        "X-Client-OS": "android",
+        "X-Client-OS-Version": "14",
+        "X-Client-Device-Model": "sdk_gphone64_arm64",
+        "X-App-Version": "2.3.18",
+        "Accept-Language": "en",
+        "User-Agent": "okhttp/4.12.0",
+        "Accept": "*/*",
+    }
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+# ---------------------------------------------------------------------------
+# Cache backends — in-memory (default) or SQL DB (sqlite/mysql/postgres)
+# ---------------------------------------------------------------------------
+# Pick backend via env:
+#   MDL_CACHE_BACKEND=memory|sqlite|mysql|postgres   (default: memory)
+#   MDL_CACHE_DB_URL=sqlite:///mdlaw_cache.db | mysql://u:p@host/db |
+#                    postgresql://u:p@host/db
+# Response change detection: every stored response keeps a sha256 hash of its
+# JSON. On TTL expiry the upstream is re-fetched; if the hash differs the row
+# is updated with changed=1 + updated_at, otherwise changed=0 and TTL extends.
+# There is no real-time push from MDL — TTL + hash comparison is the pattern.
+class CacheBackend:
+    hits = 0
+    misses = 0
+
+    def get(self, key: str) -> object | None:  # pragma: no cover
+        raise NotImplementedError
+
+    def put(self, key: str, value: object, ttl: float) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def entries(self) -> int:  # pragma: no cover
+        raise NotImplementedError
+
+    def stats(self) -> dict:
+        total = self.hits + self.misses
+        return {
+            "backend": type(self).__name__,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": round(self.hits / total, 4) if total else None,
+            "entries": self.entries(),
+        }
+
+
+class TTLCache(CacheBackend):
+    def __init__(self) -> None:
+        self._d: dict[str, tuple[float, object]] = {}
+
+    def get(self, key: str) -> object | None:
+        item = self._d.get(key)
+        if item is None:
+            self.misses += 1
+            return None
+        expires, value = item
+        if time.monotonic() > expires:
+            self._d.pop(key, None)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return value
+
+    def put(self, key: str, value: object, ttl: float) -> None:
+        self._d[key] = (time.monotonic() + ttl, value)
+
+    def entries(self) -> int:
+        return len(self._d)
+
+
+def _json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class SQLCache(CacheBackend):
+    """Persistent cache backed by sqlite (stdlib) / mysql (pymysql) / postgres (psycopg)."""
+
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS mdlaw_cache (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        hash       TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        changed    INTEGER NOT NULL DEFAULT 0
+    )"""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self._conn = None
+        self._flavor = ("mysql" if url.startswith("mysql://")
+                        else "postgres" if url.startswith(("postgresql://", "postgres://"))
+                        else "sqlite")
+        self._ph = "%s" if self._flavor != "sqlite" else "?"
+
+    # -- connection --------------------------------------------------------
+    def _connect(self):
+        if self._flavor == "sqlite":
+            import sqlite3
+            path = self.url[len("sqlite:///"):] or ":memory:"
+            conn = sqlite3.connect(path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            return conn
+        if self._flavor == "mysql":
+            try:
+                import pymysql
+            except ImportError:
+                raise RuntimeError("MySQL cache backend requires: pip install pymysql")
+            from urllib.parse import urlsplit
+            u = urlsplit(self.url)
+            return pymysql.connect(
+                host=u.hostname or "localhost", port=u.port or 3306,
+                user=u.username or "", password=u.password or "",
+                database=u.path.lstrip("/") or "", autocommit=False)
+        # postgres
+        try:
+            import psycopg
+        except ImportError:
+            raise RuntimeError("PostgreSQL cache backend requires: pip install 'psycopg[binary]'")
+        return psycopg.connect(self.url)
+
+    def _cursor(self):
+        if self._conn is None:
+            self._conn = self._connect()
+            self._conn.execute(self._SCHEMA)
+            self._conn.commit()
+        try:
+            return self._conn.cursor()
+        except Exception:
+            # server went away — reconnect once
+            self._conn = self._connect()
+            self._conn.execute(self._SCHEMA)
+            self._conn.commit()
+            return self._conn.cursor()
+
+    # -- ops ---------------------------------------------------------------
+    def get(self, key: str) -> object | None:
+        cur = self._cursor()
+        cur.execute(f"SELECT value, expires_at FROM mdlaw_cache WHERE key = {self._ph}", (key,))
+        row = cur.fetchone()
+        cur.close()
+        if row is None:
+            self.misses += 1
+            return None
+        value, expires = row
+        if expires <= time.time():
+            self._delete(key)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return json.loads(value)
+
+    def _delete(self, key: str) -> None:
+        cur = self._cursor()
+        cur.execute(f"DELETE FROM mdlaw_cache WHERE key = {self._ph}", (key,))
+        self._conn.commit()
+        cur.close()
+
+    def put(self, key: str, value: object, ttl: float) -> None:
+        h = _json_hash(value)
+        now = time.time()
+        expires = now + ttl
+        cur = self._cursor()
+        # detect change: compare hash of stored row vs new one
+        cur.execute(f"SELECT hash, created_at FROM mdlaw_cache WHERE key = {self._ph}", (key,))
+        row = cur.fetchone()
+        if row is None:
+            created = updated = now
+            changed = 0
+        else:
+            old_hash, created = row
+            changed = 0 if old_hash == h else 1
+            updated = now
+        value_json = json.dumps(value, ensure_ascii=False)
+        if self._flavor == "mysql":
+            sql = (f"INSERT INTO mdlaw_cache (key,value,expires_at,hash,created_at,updated_at,changed) "
+                   f"VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                   f"ON DUPLICATE KEY UPDATE value=VALUES(value), expires_at=VALUES(expires_at), "
+                   f"hash=VALUES(hash), updated_at=VALUES(updated_at), changed=VALUES(changed)")
+        else:
+            sql = (f"INSERT INTO mdlaw_cache (key,value,expires_at,hash,created_at,updated_at,changed) "
+                   f"VALUES ({self._ph},{self._ph},{self._ph},{self._ph},{self._ph},{self._ph},{self._ph}) "
+                   f"ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at, "
+                   f"hash=excluded.hash, updated_at=excluded.updated_at, changed=excluded.changed")
+        cur.execute(sql, (key, value_json, expires, h, created, updated, changed))
+        self._conn.commit()
+        cur.close()
+
+    def entries(self) -> int:
+        cur = self._cursor()
+        cur.execute("SELECT COUNT(*) FROM mdlaw_cache")
+        n = cur.fetchone()[0]
+        cur.close()
+        return n
+
+    def stats(self) -> dict:
+        s = super().stats()
+        s["backend"] = f"SQLCache({self._flavor})"
+        return s
+
+
+def _make_cache_backend() -> CacheBackend:
+    backend = os.environ.get("MDL_CACHE_BACKEND", "memory").strip().lower()
+    if backend == "memory":
+        return TTLCache()
+    url = os.environ.get("MDL_CACHE_DB_URL", "").strip()
+    if not url:
+        raise RuntimeError(f"MDL_CACHE_BACKEND={backend} requires MDL_CACHE_DB_URL "
+                           "(e.g. sqlite:///mdlaw_cache.db, mysql://u:p@host/db, "
+                           "postgresql://u:p@host/db)")
+    if backend in ("sqlite", "mysql", "postgres") and not url.startswith(
+            ("sqlite:///", "mysql://", "postgresql://", "postgres://")):
+        raise RuntimeError(f"MDL_CACHE_DB_URL scheme does not match backend {backend}")
+    return SQLCache(url)
+
+
+cache = _make_cache_backend()
+
+# ---------------------------------------------------------------------------
+# Upstream client
+# ---------------------------------------------------------------------------
+# Outbound throttle: WAF rate-limits bursts (validated: rapid probes -> soft 404).
+_SEM = asyncio.Semaphore(2)
+_last_out = 0.0
+_out_lock = asyncio.Lock()
+MIN_INTERVAL = 0.5  # seconds between upstream requests
+
+
+async def _throttle() -> None:
+    global _last_out
+    async with _out_lock:
+        wait = MIN_INTERVAL - (time.monotonic() - _last_out)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_out = time.monotonic()
+
+
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            base_url=API_BASE,
+            headers=default_headers(),
+            timeout=20.0,
+            limits=httpx.Limits(max_keepalive_connections=10),
+        )
+    return _client
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Startup/shutdown: verify the API key is present (public build requires
+    it — fail fast, not on first request), then nothing else to init (lazy
+    client); close the httpx client on shutdown so uvicorn/gunicorn can
+    restart cleanly."""
+    if not API_KEY:
+        raise RuntimeError(
+            "MDL_API_KEY is required. "
+            "Set it in your environment (e.g. export MDL_API_KEY=... or in .env) "
+            "before starting the server."
+        )
+    yield
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+
+
+async def fetch(method: str, path: str, ttl: float,
+                body: dict | None = None,
+                cache_key: str | None = None,
+                auth: bool = False) -> object:
+    """GET/POST with cache + throttle. Returns parsed JSON (never caches errors).
+    When auth=True and credentials are configured, sends a Bearer token and
+    transparently refreshes + retries once on HTTP 401 (like the app's
+    _renewTokenInterceptor)."""
+    key = cache_key or f"{method} {path}"
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    if auth and not auth_enabled():
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": "this endpoint requires MDL_USERNAME and "
+                                            "MDL_PASSWORD env vars"})
+    headers = await auth_headers() if auth else None
+    async with _SEM:
+        await _throttle()
+        try:
+            r = await get_client().request(method, path, headers=headers, json=body)
+            if r.status_code == 401 and auth and auth_enabled():
+                await refresh()
+                headers = await auth_headers()
+                r = await get_client().request(method, path, headers=headers, json=body)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _upstream_error(e.response.status_code, e.response.text) from e
+        except httpx.TimeoutException as e:
+            raise HTTPException(504, {"error": True, "code": 504,
+                                      "detail": "upstream timeout"}) from e
+        except httpx.HTTPError as e:
+            raise HTTPException(502, {"error": True, "code": 502,
+                                      "detail": f"upstream error: {e}"}) from e
+    data = r.json()
+    cache.put(key, data, ttl)
+    return data
+
+def _upstream_error(status: int, body: str) -> HTTPException:
+    try:
+        import json
+        detail = json.loads(body)
+    except Exception:
+        detail = body[:300]
+    return HTTPException(status, {"error": True, "code": status, "detail": detail})
+
+
+# ---------------------------------------------------------------------------
+# Auth — single account via env vars, auto-login + auto-refresh
+# ---------------------------------------------------------------------------
+# The MDL app API requires a Bearer token for account features (title detail,
+# watchlist, reviews, …). This wrapper logs in once with the account from the
+# env and transparently refreshes the token when it expires (on HTTP 401 /
+# invalid_grant), so every request can be authenticated. 2FA is NOT supported
+# here — if your account has 2FA enabled, either disable it or use an app
+# password. Reverse-engineered from REPORT.md §1 (auth flow).
+MDL_USERNAME = os.environ.get("MDL_USERNAME", "").strip()
+MDL_PASSWORD = os.environ.get("MDL_PASSWORD", "").strip()
+
+_auth = {
+    "token": None,
+    "refresh_token": None,
+    "device_id": str(uuid.uuid4()),
+    "user": None,
+    "expires_at": 0.0,
+    "login_error": None,
+    "last_login": None,
+    "last_refresh": None,
+    "refreshes": 0,
+}
+_auth_lock = asyncio.Lock()
+# refresh guard: re-login instead of refresh when refresh fails
+_REFRESHED = False
+
+
+def _md5(s: str) -> str:
+    return hashlib.md5(s.encode()).hexdigest()
+
+
+def auth_enabled() -> bool:
+    return bool(MDL_USERNAME and MDL_PASSWORD)
+
+
+async def _auth_request(method: str, path: str, body: dict | None = None,
+                        token: str | None = None) -> dict:
+    """Direct upstream call for auth endpoints (bypasses cache; no auth header
+    unless token passed). Returns parsed JSON or raises HTTPException."""
+    h = default_headers(token=token)
+    async with _SEM:
+        await _throttle()
+        try:
+            r = await get_client().request(method, path, headers=h, json=body)
+        except httpx.HTTPStatusError as e:
+            raise _upstream_error(e.response.status_code, e.response.text) from e
+        except httpx.TimeoutException as e:
+            raise HTTPException(504, {"error": True, "code": 504,
+                                      "detail": "upstream timeout"}) from e
+        except httpx.HTTPError as e:
+            raise HTTPException(502, {"error": True, "code": 502,
+                                      "detail": f"upstream error: {e}"}) from e
+    return r.json()
+
+
+async def login(force: bool = False) -> dict:
+    """Login with env credentials. Cached until forced or token expires."""
+    async with _auth_lock:
+        if (not force and _auth["token"]
+                and _auth["expires_at"] > time.time()):
+            return _auth
+        if not auth_enabled():
+            raise HTTPException(400, {"error": True, "code": 400,
+                                      "detail": "MDL_USERNAME/MDL_PASSWORD not set"})
+        try:
+            data = await _auth_request(
+                "POST", f"/auth/login?device_id={_auth['device_id']}",
+                body={"username": MDL_USERNAME, "password": _md5(MDL_PASSWORD)})
+            if "challenge_id" in data or "2fa" in str(data).lower():
+                raise HTTPException(428, {"error": True, "code": 428,
+                                          "detail": "2FA required on this account — "
+                                                    "disable 2FA or use an app password"})
+            if "access_token" not in data and "token" not in data:
+                raise HTTPException(400, {"error": True, "code": 400,
+                                          "detail": f"login response missing token: {data}"})
+        except HTTPException as e:
+            _auth["login_error"] = str(e.detail)
+            _auth["last_login"] = None
+            raise
+        _set_tokens(data)
+        _auth["login_error"] = None
+        _auth["last_login"] = time.time()
+        return _auth
+
+
+def _set_tokens(data: dict) -> None:
+    _auth["token"] = data.get("access_token") or data.get("token")
+    _auth["refresh_token"] = data.get("refresh_token")
+    _auth["user"] = data.get("user")
+    # Prefer server-provided lifetime; else decode JWT exp; else 6h fallback.
+    expires_in = data.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        _auth["expires_at"] = time.time() + float(expires_in)
+        return
+    try:
+        import base64
+        payload = _auth["token"].split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0)
+        _auth["expires_at"] = float(exp)
+    except Exception:
+        _auth["expires_at"] = time.time() + 6 * 3600
+
+
+async def refresh() -> dict:
+    """Refresh token; if refresh fails, re-login. Returns _auth dict."""
+    global _REFRESHED
+    async with _auth_lock:
+        if not _auth["refresh_token"]:
+            return await login(force=True)
+        try:
+            data = await _auth_request(
+                "POST", f"/auth/refresh?device_id={_auth['device_id']}",
+                body={"refresh_token": _auth["refresh_token"]},
+                token=_auth["token"])
+            _set_tokens(data)
+            _auth["last_refresh"] = time.time()
+            _auth["refreshes"] += 1
+            _REFRESHED = True
+        except HTTPException:
+            _REFRESHED = False
+            return await login(force=True)
+        return _auth
+
+
+async def auth_headers() -> dict[str, str]:
+    """Headers with a valid Bearer token; auto-login/refresh when needed."""
+    if not auth_enabled():
+        return default_headers()
+    if not _auth["token"] or _auth["expires_at"] <= time.time() + 60:
+        await login()
+    return default_headers(token=_auth["token"])
+app = FastAPI(
+    title="mdlaw — MyDramaList API Wrapper",
+    version="1.0.0",
+    description=(
+        "Blazing-fast unofficial API for MyDramaList, powered by the official "
+        "MDL Android app API.\n\n"
+        "**Interactive docs:**\n"
+        "- [Swagger UI (playground)](/docs) — try every endpoint live\n"
+        "- [ReDoc](/redoc) — clean reference docs\n"
+        "- [OpenAPI JSON](/openapi.json) — machine-readable spec\n\n"
+        "Not affiliated with MyDramaList."
+    ),
+    lifespan=lifespan,
+    swagger_ui_parameters={
+        "defaultModelsExpandDepth": -1,   # hide schemas section, focus on endpoints
+        "tryItOutEnabled": True,          # playground open by default
+        "displayRequestDuration": True,   # show latency per request
+    },
+)
+
+_START = time.time()
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Landing: point humans at the interactive docs."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
+def _resp(data: object, ttl: float) -> JSONResponse:
+    return JSONResponse(data, headers={"Cache-Control": f"public, max-age={int(ttl)}"})
+
+
+@app.get("/api/v1/auth/status")
+async def auth_status() -> dict:
+    """Auth state: configured? logged in? token expiry, last refresh."""
+    return {
+        "configured": auth_enabled(),
+        "logged_in": bool(_auth["token"]),
+        "user": _auth["user"],
+        "expires_at": _auth["expires_at"],
+        "last_login": _auth["last_login"],
+        "last_refresh": _auth["last_refresh"],
+        "refreshes": _auth["refreshes"],
+        "login_error": _auth["login_error"],
+    }
+
+
+@app.post("/api/v1/auth/login", include_in_schema=False)
+async def auth_login() -> dict:
+    """Force a fresh login (credentials from env). Returns token state."""
+    return await login(force=True)
+
+
+@app.post("/api/v1/auth/refresh", include_in_schema=False)
+async def auth_refresh() -> dict:
+    """Force a token refresh (or re-login if refresh fails)."""
+    return await refresh()
+
+
+@app.get("/api/v1/cache/stats")
+async def cache_stats() -> dict:
+    """Cache backend info + hit stats + change-detection count."""
+    return {
+        "backend": getattr(cache, "_flavor", "memory"),
+        "hits": cache.hits,
+        "misses": cache.misses,
+        "hit_rate": round(cache.hits / (cache.hits + cache.misses), 4) if (cache.hits + cache.misses) else None,
+        "entries": cache.entries(),
+    }
+
+
+@app.get("/api/v1/health")
+async def health() -> dict:
+    return {
+        "status": "ok",
+        "service": "mdlaw",
+        "auth": auth_enabled(),
+    }
+
+
+@app.get("/api/v1/dashboard")
+async def dashboard() -> dict:
+    """Health dashboard: uptime, cache stats, per-route registry."""
+    total = cache.hits + cache.misses
+    return {
+        "status": "ok",
+        "service": "mdlaw",
+        "version": "1.0.0",
+        "uptime_seconds": int(time.time() - _START),
+        "cache": {
+            "hits": cache.hits,
+            "misses": cache.misses,
+            "hit_rate": round(cache.hits / total, 4) if total else None,
+            "entries": cache.entries(),
+            "backend": getattr(cache, "_flavor", "memory"),
+        },
+        "upstream": {
+            "base": API_BASE,
+            "key_source": "plaintext",
+        },
+        "auth": {
+            "configured": auth_enabled(),
+            "logged_in": bool(_auth["token"]),
+            "refreshes": _auth["refreshes"],
+        },
+        "routes": [
+            {
+                "path": r.path,
+                "methods": sorted(r.methods or []),
+            }
+            for r in app.routes
+            if getattr(r, "path", "").startswith("/api/v1")
+        ],
+    }
+
+
+@app.get("/api/v1/status")
+async def status() -> JSONResponse:
+    """Alias of /dashboard kept for monitoring probes."""
+    return JSONResponse(await dashboard())
+
+
+@app.get("/api/v1/genres")
+async def genres() -> JSONResponse:
+    return _resp(await fetch("GET", "/genres", ttl=3600), 3600)
+
+
+@app.get("/api/v1/languages")
+async def languages() -> JSONResponse:
+    return _resp(await fetch("GET", "/languages/supported?v=2", ttl=3600), 3600)
+
+
+@app.get("/api/v1/titles/{tid}/reviews")
+async def title_reviews(tid: int) -> JSONResponse:
+    return _resp(await fetch("GET", f"/titles/{tid}/reviews", ttl=300), 300)
+
+
+@app.get("/api/v1/titles/{tid}")
+async def title_detail(tid: int) -> JSONResponse:
+    """Title detail — requires auth (upstream 400s without a token)."""
+    return _resp(await fetch("GET", f"/titles/{tid}?expand=1", ttl=300, auth=True), 300)
+
+
+@app.get("/api/v1/titles/{tid}/recommendations")
+async def title_recommendations(tid: int) -> JSONResponse:
+    return _resp(await fetch("GET", f"/titles/{tid}/recommendations", ttl=600, auth=True), 600)
+
+
+@app.post("/api/v1/search")
+async def search(q: str) -> JSONResponse:
+    """Search titles by keyword. MDL moved to POST + JSON body (GET now 405)."""
+    if not q.strip():
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": "query param q is required"})
+    return _resp(await fetch("POST", "/search", ttl=300, auth=True,
+                             body={"q": q, "synopsis": 1}), 300)
+
+
+@app.post("/api/v1/search/people")
+async def search_people(q: str) -> JSONResponse:
+    """Search people by name. MDL moved to POST + JSON body (GET now 405)."""
+    if not q.strip():
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": "query param q is required"})
+    return _resp(await fetch("POST", "/search/people", ttl=300, auth=True,
+                             body={"q": q}), 300)
+
+
+@app.get("/api/v1/watchlist")
+async def watchlist() -> JSONResponse:
+    """Current user's watchlist (requires auth)."""
+    return _resp(await fetch("GET", "/sync/mylist/watchlist", ttl=60, auth=True), 60)
+
+
+@app.get("/api/v1/watchlist/{status}")
+async def watchlist_by_status(status: str) -> JSONResponse:
+    """Watchlist filtered by status: completed|dropped|onhold|plantowatch|notinterested|undecided."""
+    valid = ("completed", "dropped", "onhold", "plantowatch", "notinterested", "undecided")
+    if status not in valid:
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": f"status must be one of {valid}"})
+    return _resp(await fetch("GET", f"/sync/mylist/{status}", ttl=60, auth=True), 60)
+
+
+@app.get("/api/v1/me")
+async def me() -> JSONResponse:
+    """Current account profile (requires auth)."""
+    return _resp(await fetch("GET", "/users/me", ttl=60, auth=True), 60)
+
+
+@app.get("/api/v1/titles/{tid}/comments")
+async def title_comments(tid: int) -> JSONResponse:
+    return _resp(await fetch("GET", f"/titles/{tid}/comments", ttl=300), 300)
+
+
+@app.get("/api/v1/titles/{tid}/credits")
+async def title_credits(tid: int) -> JSONResponse:
+    # Auth-gated upstream (400 without token); same clear error as other
+    # auth-gated endpoints.
+    return _resp(await fetch("GET", f"/titles/{tid}/credits", ttl=300, auth=True), 300)
+
+
+@app.get("/api/v1/calendar")
+async def calendar() -> JSONResponse:
+    return _resp(await fetch("POST", "/calendar/episodes", body={}, ttl=3600), 3600)
+
+
+@app.get("/api/v1/articles/featured")
+async def articles_featured(page: int = 1) -> JSONResponse:
+    return _resp(await fetch("GET", f"/articles/featured?page={page}", ttl=600), 600)
+
+
+@app.get("/api/v1/lists/featured")
+async def lists_featured(limit: int = 5) -> JSONResponse:
+    return _resp(await fetch("GET", f"/lists/featured?limit={limit}", ttl=600), 600)
+
+
+@app.get("/api/v1/lists/popular")
+async def lists_popular(limit: int = 5) -> JSONResponse:
+    return _resp(await fetch("GET", f"/lists/popular_voting_lists?limit={limit}", ttl=600), 600)
+
+
+@app.get("/api/v1/people/leaderboard")
+async def leaderboard(period: str = "alltime") -> JSONResponse:
+    if period not in ("alltime", "weekly", "monthly"):
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": "period must be alltime|weekly|monthly"})
+    return _resp(await fetch("GET", f"/people/leaderboard?time_period={period}", ttl=600), 600)
+
+
+@app.get("/api/v1/people/{pid}")
+async def people(pid: int) -> JSONResponse:
+    return _resp(await fetch("GET", f"/people/{pid}", ttl=86400), 86400)
+
+
+@app.get("/api/v1/payment/plans")
+async def payment_plans() -> JSONResponse:
+    return _resp(await fetch("GET", "/payment/plans", ttl=3600), 3600)
+
+
+@app.get("/api/v1/payment/coins")
+async def payment_coins() -> JSONResponse:
+    return _resp(await fetch("GET", "/payment/coins", ttl=3600), 3600)
+
+
+# ---------------------------------------------------------------------------
+# Offline self-check
+# ---------------------------------------------------------------------------
+def self_check() -> int:
+    assert API_KEY, "API key must be set (MDL_API_KEY env var)"
+    h = default_headers()
+    assert h["mdl-api-key"] == API_KEY
+    assert h["User-Agent"] == "okhttp/4.12.0" and h["Accept"] == "*/*"
+    assert "Authorization" not in h
+    assert default_headers("t")["Authorization"] == "Bearer t"
+    assert _md5("secret") == "5ebe2294ecd0e0f08eab7690d2a6ee69", "md5"
+    c = TTLCache()
+    c.put("k", {"a": 1}, 100)
+    assert c.get("k") == {"a": 1}
+    c.put("e", 1, -1)
+    assert c.get("e") is None
+    assert cache.get("never") is None
+    # SQL cache backend (sqlite in-memory): put/get + change detection
+    s = SQLCache("sqlite:///:memory:")
+    s.put("k", {"a": 1}, 100)
+    assert s.get("k") == {"a": 1}
+    s.put("k", {"a": 2}, 100)          # changed value
+    cur = s._cursor()
+    cur.execute("SELECT changed FROM mdlaw_cache WHERE key = 'k'")
+    row = cur.fetchone()
+    assert row is not None and row[0] == 1, "change detection must flag changed value"
+    cur.close()
+    s.put("k", {"a": 2}, 100)          # same value
+    cur = s._cursor()
+    cur.execute("SELECT changed FROM mdlaw_cache WHERE key = 'k'")
+    row = cur.fetchone()
+    assert row is not None and row[0] == 0, "same value must not flag changed"
+    cur.close()
+    print(f"PASS: offline checks (key={API_KEY!r}, headers, cache, md5, sqlcache)")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point (console script `mdlaw`)."""
+    import sys
+    args = argv if argv is not None else sys.argv[1:]
+    if args and args[0] == "self":
+        return self_check()
+    if args and args[0] in ("serve", "run"):
+        args = args[1:]
+    import uvicorn
+    uvicorn.run("mdlaw:app", host="0.0.0.0", port=8000)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

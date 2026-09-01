@@ -1,0 +1,27 @@
+# mdlaw — Docker Compose (production-ish)
+# Usage:
+#   cp .env.example .env   # fill MDL_API_KEY (REQUIRED) + optional MDL_USERNAME/PASSWORD, cache
+#   docker compose up -d
+services:
+  mdlaw:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MDL_API_KEY: ${MDL_API_KEY:?MDL_API_KEY is required on the public build}
+      MDL_USERNAME: ${MDL_USERNAME:-}
+      MDL_PASSWORD: ${MDL_PASSWORD:-}
+      MDL_CACHE_BACKEND: ${MDL_CACHE_BACKEND:-memory}
+      MDL_CACHE_DB_URL: ${MDL_CACHE_DB_URL:-}
+    volumes:
+      - mdlaw_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  mdlaw_data:
