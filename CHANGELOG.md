@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Cloudflare "Just a moment..." 403 challenge now returns a clear,
+  actionable message (suggests `MDL_TRANSPORT=curl_cffi`) instead of dumping
+  raw HTML.
+
+## [1.3.0] - 2026-09-02
+
 ### Added
 
 - **Python package layer**: new `MDL` class — use `mdlaw` as an async library

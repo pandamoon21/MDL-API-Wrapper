@@ -49,7 +49,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (e.g. safari_ios) which passes the challenge.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "httpx").strip().lower()
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Header scheme recovered from RequestHeaders.json() — validated: without
 # User-Agent + Accept-Language + Accept the API returns 403 (Cloudflare WAF).
@@ -394,6 +394,14 @@ async def fetch(method: str, path: str, ttl: float,
     return data
 
 def _upstream_error(status: int, body: str) -> HTTPException:
+    # Cloudflare bot-protection challenge (403 + "Just a moment..."). Tell the
+    # user the fix instead of dumping raw HTML.
+    if status == 403 and ("Just a moment" in body or "challenge" in body.lower()):
+        return HTTPException(403, {"error": True, "code": 403,
+                                   "detail": "Cloudflare blocked this request. Your IP is "
+                                             "flagged — run with MDL_TRANSPORT=curl_cffi "
+                                             "(pip install curl_cffi) to impersonate a "
+                                             "browser/mobile TLS fingerprint."})
     try:
         import json
         detail = json.loads(body)

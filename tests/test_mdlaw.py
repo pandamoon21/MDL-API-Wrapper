@@ -41,6 +41,16 @@ def test_md5_formula():
     assert mdlaw._md5("secret") == "5ebe2294ecd0e0f08eab7690d2a6ee69"
 
 
+def test_cloudflare_challenge_message():
+    # 403 + "Just a moment..." (Cloudflare challenge) → helpful message, not raw HTML
+    e = mdlaw._upstream_error(403, "<!DOCTYPE html><html><title>Just a moment...</title></html>")
+    assert e.status_code == 403
+    assert "curl_cffi" in str(e.detail)
+    # non-challenge errors keep the original detail
+    e2 = mdlaw._upstream_error(404, "not found")
+    assert e2.status_code == 404 and "not found" in str(e2.detail)
+
+
 def test_auth_offline(monkeypatch):
     # auth reads env at import time — force it off so this test is
     # deterministic regardless of the surrounding shell environment
