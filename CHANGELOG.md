@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-02
+
+### Fixed
+
+- False-positive 428 "2FA required" on login. A login response that carries
+  both `access_token` and a `challenge_id` (device verification) was wrongly
+  rejected — `challenge_id` is NOT 2FA (MDL 2FA is a separate `/auth/2fa/*`
+  flow). Login now succeeds whenever a token is present; 428 is raised only
+  for genuine 2FA markers (`requires_2fa`, `otp_*`, code 428).
+
 ## [1.6.1] - 2026-09-02
 
 ### Added

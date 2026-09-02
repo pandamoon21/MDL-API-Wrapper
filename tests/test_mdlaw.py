@@ -72,6 +72,53 @@ def test_headers_scheme():
     assert mdlaw.default_headers("tok")["Authorization"] == "Bearer tok"
 
 
+def test_login_challenge_id_with_token_succeeds(monkeypatch):
+    # Regression: a login response that carries BOTH access_token and a
+    # challenge_id (device verification) must succeed — it is NOT 2FA.
+    # The old heuristic checked challenge_id first and raised 428.
+    async def fake_auth_request(method, path, body=None, token=None):
+        return {"access_token": "tok123", "expires_in": 2592000,
+                "challenge_id": "device-challenge-abc"}
+    monkeypatch.setattr(mdlaw, "_auth_request", fake_auth_request)
+    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u@x.com")
+    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "pw")
+    monkeypatch.setattr(mdlaw, "_save_auth", lambda: None)
+    # reset cached auth state
+    mdlaw._auth["token"] = None
+    mdlaw._auth["refresh_token"] = None
+    mdlaw._auth["expires_at"] = 0
+
+    async def run():
+        r = await mdlaw.login(force=True)
+        assert r["token"] == "tok123"
+        assert r["login_error"] is None
+    asyncio.run(run())
+    # cleanup so other tests aren't affected
+    mdlaw._auth["token"] = None
+    mdlaw.MDL_USERNAME = ""
+    mdlaw.MDL_PASSWORD = ""
+
+
+def test_login_2fa_still_detected(monkeypatch):
+    # A genuine 2FA response (no token, 2fa marker) still raises 428.
+    async def fake_auth_request(method, path, body=None, token=None):
+        return {"code": 428, "message": "2fa required",
+                "requires_2fa": True}
+    monkeypatch.setattr(mdlaw, "_auth_request", fake_auth_request)
+    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u@x.com")
+    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "pw")
+
+    async def run():
+        try:
+            await mdlaw.login(force=True)
+            assert False, "expected 428"
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 428
+    asyncio.run(run())
+    mdlaw.MDL_USERNAME = ""
+    mdlaw.MDL_PASSWORD = ""
+
+
 def test_ttl_cache():
     c = mdlaw.TTLCache()
     c.put("k", {"a": 1}, 100)

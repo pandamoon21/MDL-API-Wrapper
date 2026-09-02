@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -496,22 +496,30 @@ async def login(force: bool = False) -> dict:
             data = await _auth_request(
                 "POST", f"/auth/login?device_id={_auth['device_id']}",
                 body={"username": MDL_USERNAME, "password": _md5(MDL_PASSWORD)})
-            if "challenge_id" in data or "2fa" in str(data).lower():
+            # A successful login always carries an access token. Some responses
+            # also include a `challenge_id` — that is a device-verification
+            # challenge, NOT 2FA (2FA on MDL is a separate /auth/2fa/* flow).
+            # Checking challenge_id first falsely rejected valid logins.
+            if data.get("access_token") or data.get("token"):
+                _set_tokens(data)
+                _auth["login_error"] = None
+                _auth["last_login"] = time.time()
+                _save_auth()
+                return _auth
+            # No token: distinguish real 2FA (distinct response keys / code 428)
+            # from other failures.
+            if any(k in data for k in
+                   ("two_factor", "requires_2fa", "otp_required", "otp_challenge")) \
+                    or data.get("code") == 428:
                 raise HTTPException(428, {"error": True, "code": 428,
                                           "detail": "2FA required on this account — "
                                                     "disable 2FA or use an app password"})
-            if "access_token" not in data and "token" not in data:
-                raise HTTPException(400, {"error": True, "code": 400,
-                                          "detail": f"login response missing token: {data}"})
+            raise HTTPException(400, {"error": True, "code": 400,
+                                      "detail": f"login response missing token: {data}"})
         except HTTPException as e:
             _auth["login_error"] = str(e.detail)
             _auth["last_login"] = None
             raise
-        _set_tokens(data)
-        _auth["login_error"] = None
-        _auth["last_login"] = time.time()
-        _save_auth()
-        return _auth
 
 
 def _set_tokens(data: dict) -> None:
