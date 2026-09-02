@@ -395,6 +395,10 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/lists/popular?limit={limit}` | `GET /lists/popular_voting_lists` | 10m | — |
 | GET | `/api/v1/people/leaderboard?period={alltime\|weekly\|monthly}` | `GET /people/leaderboard` | 10m | — |
 | GET | `/api/v1/people/{id}` | `GET /people/{id}` | 24h | — |
+| GET | `/api/v1/people/{id}/credits` | `GET /people/{id}/credits` | 24h | — |
+| GET | `/api/v1/users/{id}` | `GET /users/{id}` | 10m | — |
+| GET | `/api/v1/users/{id}/stats` | `GET /users/{id}/stats` | 10m | — |
+| GET | `/api/v1/tags/search?q={q}` | `GET /tags/search` | 10m | — |
 | GET | `/api/v1/payment/plans` | `GET /payment/plans` | 1h | — |
 | GET | `/api/v1/payment/coins` | `GET /payment/coins` | 1h | — |
 

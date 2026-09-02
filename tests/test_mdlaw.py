@@ -82,8 +82,8 @@ def test_ttl_cache():
 
 def test_route_count():
     routes = [r.path for r in mdlaw.app.routes if r.path.startswith("/api/")]
-    # 25 data routes + dashboard + status
-    assert len(routes) == 27, routes
+    # 29 data routes + dashboard + status (31 total)
+    assert len(routes) == 31, routes
 
 
 def test_leaderboard_validation():
@@ -141,6 +141,30 @@ def test_mdl_library_layer(monkeypatch):
         ("GET", "/sync/mylist/watchlist", 60, True, None),
         ("GET", "/sync/mylist/completed", 60, True, None),
         ("GET", "/users/me", 60, True, None),
+    ]
+    assert calls == expected, calls
+
+
+def test_mdl_new_endpoints(monkeypatch):
+    # people_credits / user / user_stats / search_tags → path mapping.
+    calls = []
+    async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
+        calls.append((method, path, ttl, auth, body))
+        return {"ok": True}
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+
+    async def run():
+        mdl = mdlaw.MDL()
+        await mdl.people_credits(119246)
+        await mdl.user(1)
+        await mdl.user_stats(1)
+        await mdl.search_tags("romance")
+    asyncio.run(run())
+    expected = [
+        ("GET", "/people/119246/credits", 86400, False, None),
+        ("GET", "/users/1", 600, False, None),
+        ("GET", "/users/1/stats", 600, False, None),
+        ("GET", "/tags/search?q=romance", 600, False, None),
     ]
     assert calls == expected, calls
 

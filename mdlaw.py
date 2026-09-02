@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.6"
+__version__ = "1.6.0"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -398,9 +398,16 @@ async def fetch(method: str, path: str, ttl: float,
         except httpx.HTTPError as e:
             raise HTTPException(502, {"error": True, "code": 502,
                                       "detail": f"upstream error: {e}"}) from e
-    data = r.json()
+    try:
+        data = r.json()
+    except (UnicodeDecodeError, ValueError):
+        # Some profiles contain non-UTF-8 bytes (e.g. Arabic display names
+        # served as ISO-8859-1/Windows-1252). Decode leniently instead of 500.
+        text = r.content.decode("utf-8", errors="replace")
+        data = json.loads(text)
     cache.put(key, data, ttl)
     return data
+
 
 def _upstream_error(status: int, body: str) -> HTTPException:
     # Cloudflare bot-protection challenge (403 + "Just a moment..."). Tell the
@@ -842,6 +849,30 @@ async def people(pid: int) -> JSONResponse:
     return _resp(await fetch("GET", f"/people/{pid}", ttl=86400), 86400)
 
 
+@app.get("/api/v1/people/{pid}/credits")
+async def people_credits(pid: int) -> JSONResponse:
+    """Filmography (cast/crew) for a person/actor."""
+    return _resp(await fetch("GET", f"/people/{pid}/credits", ttl=86400), 86400)
+
+
+@app.get("/api/v1/users/{uid}")
+async def user(uid: int) -> JSONResponse:
+    """Public user profile by id."""
+    return _resp(await fetch("GET", f"/users/{uid}", ttl=600), 600)
+
+
+@app.get("/api/v1/users/{uid}/stats")
+async def user_stats(uid: int) -> JSONResponse:
+    """Public user stats (collected/rated counts, distribution)."""
+    return _resp(await fetch("GET", f"/users/{uid}/stats", ttl=600), 600)
+
+
+@app.get("/api/v1/tags/search")
+async def search_tags(q: str) -> JSONResponse:
+    """Search drama tags (e.g. q=romance → Romance, Bromance, …)."""
+    return _resp(await fetch("GET", f"/tags/search?q={q}", ttl=600), 600)
+
+
 @app.get("/api/v1/payment/plans")
 async def payment_plans() -> JSONResponse:
     return _resp(await fetch("GET", "/payment/plans", ttl=3600), 3600)
@@ -911,6 +942,22 @@ class MDL:
 
     async def people(self, pid: int) -> object:
         return await self.get(f"/people/{pid}", ttl=86400)
+
+    async def people_credits(self, pid: int) -> object:
+        """Filmography (cast/crew) for a person/actor."""
+        return await self.get(f"/people/{pid}/credits", ttl=86400)
+
+    async def user(self, uid: int) -> object:
+        """Public user profile by id."""
+        return await self.get(f"/users/{uid}", ttl=600)
+
+    async def user_stats(self, uid: int) -> object:
+        """Public user stats (collected/rated counts, distribution)."""
+        return await self.get(f"/users/{uid}/stats", ttl=600)
+
+    async def search_tags(self, q: str) -> object:
+        """Search drama tags (e.g. q=romance → Romance, Bromance, …)."""
+        return await self.get(f"/tags/search?q={q}", ttl=600)
 
     async def payment_plans(self) -> object:
         return await self.get("/payment/plans", ttl=3600)

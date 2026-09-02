@@ -39,14 +39,14 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 18 passed
+python3 -m pytest tests/ -q      # expect: 19 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/test_mdlaw.py # 18 offline checks (no network)
+tests/test_mdlaw.py # 19 offline checks (no network)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
 Dockerfile          # python:3.12-slim, non-root

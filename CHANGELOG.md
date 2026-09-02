@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-02
+
+### Added
+
+- New public endpoints + `MDL` methods (live verified, no auth needed):
+  - `GET /api/v1/people/{id}/credits` → `MDL.people_credits(pid)`
+  - `GET /api/v1/users/{id}` → `MDL.user(uid)`
+  - `GET /api/v1/users/{id}/stats` → `MDL.user_stats(uid)`
+  - `GET /api/v1/tags/search?q={q}` → `MDL.search_tags(q)`
+
+### Fixed
+
+- Upstream responses with non-UTF-8 bytes (e.g. Arabic display names on user
+  profiles served as Windows-1252) no longer crash with `500` — the shared
+  `fetch()` path now decodes leniently (`utf-8` + `errors="replace"`).
+
 ## [1.5.6] - 2026-09-02
 
 ### Added
