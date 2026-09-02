@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-09-02
+
+### Added
+
+- CLI search pagination: `mdlaw search "q" --page 2` and
+  `mdlaw search-people "name" --page 2` (was fixed to page 1).
+- Prebuilt Docker images published to GHCR on release tags
+  (`ghcr.io/pandamoon21/mdlaw`, linux/amd64 + linux/arm64) via
+  `.github/workflows/docker.yml`.
+
+### Changed
+
+- `requirements.txt` now pins exact versions (`fastapi==0.141.1`,
+  `uvicorn==0.52.4`, `httpx==0.28.1`, `curl_cffi==0.16.2`) for reproducible
+  deploys. `pyproject.toml` keeps `>=` bounds for library consumers.
+
 ## [1.5.5] - 2026-09-02
 
 ### Fixed

@@ -112,7 +112,9 @@ mdlaw auth status                # show saved session (user, token expiry)
 mdlaw logout                     # remove the saved session
 mdlaw genres                     # all genres
 mdlaw search "crash landing"     # search titles (requires auth)
+mdlaw search "crash landing" --page 2  # page 2 of results
 mdlaw search-people "lee minho"  # search people (requires auth)
+mdlaw search-people "lee minho" --page 2
 mdlaw title 686                  # title detail (requires auth)
 mdlaw people 12345               # actor/crew profile
 mdlaw watchlist completed        # your watchlist (requires auth)
@@ -325,6 +327,16 @@ uvicorn mdlaw:app --host 0.0.0.0 --port 8000
 ```
 
 ### Option 2 — Docker
+
+Prebuilt images are published to GHCR on every release tag
+(`ghcr.io/pandamoon21/mdlaw`, linux/amd64 + linux/arm64):
+
+```bash
+docker pull ghcr.io/pandamoon21/mdlaw:1.5.6
+docker run -p 8000:8000 ghcr.io/pandamoon21/mdlaw:1.5.6
+```
+
+Or build locally:
 
 ```bash
 docker build -t mdlaw .

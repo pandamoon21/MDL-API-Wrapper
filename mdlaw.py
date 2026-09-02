@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.5"
+__version__ = "1.5.6"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -1098,8 +1098,8 @@ Commands:
   genres                    List all genres.
   languages                 List supported languages.
   calendar                  Upcoming episodes.
-  search <query>            Search titles (requires auth).
-  search-people <name>      Search people (requires auth).
+  search <query> [--page N]    Search titles (requires auth). Default page 1.
+  search-people <name> [--page N]   Search people (requires auth).
   title <id>                Title detail (requires auth).
   people <id>               Actor/crew profile.
   watchlist [status]        Your watchlist (requires auth).
@@ -1165,12 +1165,24 @@ def _run_cli(args: list[str]) -> int:
                 return await mdl.calendar()
             if cmd == "search":
                 if not rest:
-                    raise SystemExit("usage: mdlaw search <query>")
-                return await mdl.search(" ".join(rest))
+                    raise SystemExit("usage: mdlaw search <query> [--page N]")
+                page = 1
+                q = " ".join(rest)
+                if "--page" in rest:
+                    i = rest.index("--page")
+                    page = int(rest[i + 1])
+                    q = " ".join(rest[:i])
+                return await mdl.search(q, page=page)
             if cmd == "search-people":
                 if not rest:
-                    raise SystemExit("usage: mdlaw search-people <name>")
-                return await mdl.search_people(" ".join(rest))
+                    raise SystemExit("usage: mdlaw search-people <name> [--page N]")
+                page = 1
+                q = " ".join(rest)
+                if "--page" in rest:
+                    i = rest.index("--page")
+                    page = int(rest[i + 1])
+                    q = " ".join(rest[:i])
+                return await mdl.search_people(q, page=page)
             if cmd == "title":
                 if not rest:
                     raise SystemExit("usage: mdlaw title <id>")
