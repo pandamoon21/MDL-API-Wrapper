@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI search pagination: `mdlaw search "q" --page 2` and
   `mdlaw search-people "name" --page 2` (was fixed to page 1).
 - Prebuilt Docker images published to GHCR on release tags
-  (`ghcr.io/pandamoon21/mdlaw`, linux/amd64 + linux/arm64) via
+  (`ghcr.io/pandamoon21/mdl-api-wrapper`, linux/amd64 + linux/arm64) via
   `.github/workflows/docker.yml`.
 
 ### Changed

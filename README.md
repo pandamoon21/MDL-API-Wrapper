@@ -329,11 +329,11 @@ uvicorn mdlaw:app --host 0.0.0.0 --port 8000
 ### Option 2 — Docker
 
 Prebuilt images are published to GHCR on every release tag
-(`ghcr.io/pandamoon21/mdlaw`, linux/amd64 + linux/arm64):
+(`ghcr.io/pandamoon21/mdl-api-wrapper`, linux/amd64 + linux/arm64):
 
 ```bash
-docker pull ghcr.io/pandamoon21/mdlaw:1.5.6
-docker run -p 8000:8000 ghcr.io/pandamoon21/mdlaw:1.5.6
+docker pull ghcr.io/pandamoon21/mdl-api-wrapper:1.5.6
+docker run -p 8000:8000 ghcr.io/pandamoon21/mdl-api-wrapper:1.5.6
 ```
 
 Or build locally:
