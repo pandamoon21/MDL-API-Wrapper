@@ -380,6 +380,11 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/genres` | `GET /genres` | 1h | — |
 | GET | `/api/v1/languages` | `GET /languages/supported?v=2` | 1h | — |
 | GET | `/api/v1/titles/{id}` | `GET /titles/{id}?expand=1` | 5m | ✅ |
+| GET | `/api/v1/titles/trending?page={page}` | `GET /titles/trending` | 10m | ✅ |
+| GET | `/api/v1/titles/top_airing?page={page}` | `GET /titles/top_airing` | 10m | ✅ |
+| GET | `/api/v1/titles/upcoming?page={page}` | `GET /titles/upcoming` | 10m | ✅ |
+| GET | `/api/v1/titles/currently_watching?page={page}` | `GET /titles/currently_watching` | 10m | ✅ |
+| GET | `/api/v1/titles/top_movies?page={page}` | `GET /titles/top_movies` | 10m | ✅ |
 | GET | `/api/v1/titles/{id}/reviews` | `GET /titles/{id}/reviews` | 5m | — |
 | GET | `/api/v1/titles/{id}/comments` | `GET /titles/{id}/comments` | 5m | — |
 | GET | `/api/v1/titles/{id}/credits` | `GET /titles/{id}/credits` | 5m | — |

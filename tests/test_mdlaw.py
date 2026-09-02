@@ -82,8 +82,8 @@ def test_ttl_cache():
 
 def test_route_count():
     routes = [r.path for r in mdlaw.app.routes if r.path.startswith("/api/")]
-    # 29 data routes + dashboard + status (31 total)
-    assert len(routes) == 31, routes
+    # 29 data routes + dashboard + status (36 total)
+    assert len(routes) == 36, routes
 
 
 def test_leaderboard_validation():
@@ -159,12 +159,16 @@ def test_mdl_new_endpoints(monkeypatch):
         await mdl.user(1)
         await mdl.user_stats(1)
         await mdl.search_tags("romance")
+        await mdl.titles_trending()
+        await mdl.titles_top_movies(2)
     asyncio.run(run())
     expected = [
         ("GET", "/people/119246/credits", 86400, False, None),
         ("GET", "/users/1", 600, False, None),
         ("GET", "/users/1/stats", 600, False, None),
         ("GET", "/tags/search?q=romance", 600, False, None),
+        ("GET", "/titles/trending?page=1", 600, True, None),
+        ("GET", "/titles/top_movies?page=2", 600, True, None),
     ]
     assert calls == expected, calls
 

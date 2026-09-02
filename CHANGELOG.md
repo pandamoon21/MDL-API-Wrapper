@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-02
+
+### Added
+
+- 5 auth-gated title-feed endpoints + `MDL` methods (live verified with a real
+  account): `titles/trending`, `titles/top_airing`, `titles/upcoming`,
+  `titles/currently_watching`, `titles/top_movies` — each with `?page=` and
+  10 min cache.
+
 ## [1.6.0] - 2026-09-02
 
 ### Added

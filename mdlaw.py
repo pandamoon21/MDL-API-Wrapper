@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -744,6 +744,36 @@ async def languages() -> JSONResponse:
     return _resp(await fetch("GET", "/languages/supported?v=2", ttl=3600), 3600)
 
 
+@app.get("/api/v1/titles/trending")
+async def titles_trending(page: int = 1) -> JSONResponse:
+    """Trending titles (requires auth)."""
+    return _resp(await fetch("GET", f"/titles/trending?page={page}", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/titles/top_airing")
+async def titles_top_airing(page: int = 1) -> JSONResponse:
+    """Top airing titles (requires auth)."""
+    return _resp(await fetch("GET", f"/titles/top_airing?page={page}", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/titles/upcoming")
+async def titles_upcoming(page: int = 1) -> JSONResponse:
+    """Upcoming titles (requires auth)."""
+    return _resp(await fetch("GET", f"/titles/upcoming?page={page}", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/titles/currently_watching")
+async def titles_currently_watching(page: int = 1) -> JSONResponse:
+    """Titles the community is currently watching (requires auth)."""
+    return _resp(await fetch("GET", f"/titles/currently_watching?page={page}", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/titles/top_movies")
+async def titles_top_movies(page: int = 1) -> JSONResponse:
+    """Top movies (requires auth)."""
+    return _resp(await fetch("GET", f"/titles/top_movies?page={page}", ttl=600, auth=True), 600)
+
+
 @app.get("/api/v1/titles/{tid}/reviews")
 async def title_reviews(tid: int) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/reviews", ttl=300), 300)
@@ -966,6 +996,26 @@ class MDL:
         return await self.get("/payment/coins", ttl=3600)
 
     # --- titles ---
+    async def titles_trending(self, page: int = 1) -> object:
+        """Trending titles (requires auth)."""
+        return await self.get(f"/titles/trending?page={page}", ttl=600, auth=True)
+
+    async def titles_top_airing(self, page: int = 1) -> object:
+        """Top airing titles (requires auth)."""
+        return await self.get(f"/titles/top_airing?page={page}", ttl=600, auth=True)
+
+    async def titles_upcoming(self, page: int = 1) -> object:
+        """Upcoming titles (requires auth)."""
+        return await self.get(f"/titles/upcoming?page={page}", ttl=600, auth=True)
+
+    async def titles_currently_watching(self, page: int = 1) -> object:
+        """Titles the community is currently watching (requires auth)."""
+        return await self.get(f"/titles/currently_watching?page={page}", ttl=600, auth=True)
+
+    async def titles_top_movies(self, page: int = 1) -> object:
+        """Top movies (requires auth)."""
+        return await self.get(f"/titles/top_movies?page={page}", ttl=600, auth=True)
+
     async def title(self, tid: int) -> object:
         """Title detail — requires account credentials (auth-gated upstream)."""
         return await self.get(f"/titles/{tid}?expand=1", ttl=300, auth=True)
