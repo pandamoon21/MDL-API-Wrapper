@@ -266,3 +266,10 @@ def test_auth_status_shows_username(tmp_path, monkeypatch, capsys):
     assert "token expires in:" in out
     assert "0h 59m" in out or "1h 0m" in out
 
+
+def test_openapi_version_matches_package():
+    # /docs + /openapi.json must report the real package version, not a
+    # hardcoded literal (regression: FastAPI(version="1.0.0") was hardcoded).
+    info = mdlaw.app.openapi()["info"]
+    assert info["version"] == mdlaw.__version__
+

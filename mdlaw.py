@@ -52,7 +52,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # curl_cffi dependency) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.5.4"
+__version__ = "1.5.5"
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -604,7 +604,7 @@ def _load_auth() -> bool:
     return True
 app = FastAPI(
     title="mdlaw — MyDramaList API Wrapper",
-    version="1.0.0",
+    version=__version__,
     description=(
         "Blazing-fast unofficial API for MyDramaList, powered by the official "
         "MDL Android app API.\n\n"

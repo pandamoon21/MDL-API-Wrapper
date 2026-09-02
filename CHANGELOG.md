@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.5] - 2026-09-02
+
+### Fixed
+
+- `/docs` and `/openapi.json` now report the real package version. The
+  FastAPI app had `version="1.0.0"` hardcoded while `__version__` advanced —
+  Swagger/OpenAPI always showed 1.0.0. Now `version=__version__`.
+- AGENTS.md test count updated (14 → 18).
+
 ## [1.5.4] - 2026-09-02
 
 ### Added
