@@ -39,14 +39,14 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 53 passed
+python3 -m pytest tests/ -q      # expect: 80 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/              # 53 offline checks (no network); conftest.py isolates state
+tests/              # 80 offline checks (no network); conftest.py isolates state
 .github/workflows/  # docker.yml (GHCR on tags), ci.yml (ruff + pytest, manual only)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
@@ -66,6 +66,7 @@ pytest.ini          # pythonpath = .
 | `MDL_USERNAME` + `MDL_PASSWORD` | Enable auth-gated endpoints (title detail, search, watchlist, /me) | no | disabled |
 | `MDL_CACHE_BACKEND` | `memory` \| `sqlite` \| `mysql` \| `postgres` | no | `memory` |
 | `MDL_CACHE_DB_URL` | DSN for SQL backends, e.g. `sqlite:///mdlaw_cache.db` | only if backend ≠ memory | — |
+| `MDL_LOG_LEVEL` | Server log level for the `mdlaw` logger | no | `INFO` |
 | `MDL_CACHE_MAX_ENTRIES` | In-memory cache size (LRU) | no | `10000` |
 | `MDL_ADMIN_TOKEN` | Enables `POST /api/v1/auth/{login,refresh}` via `X-Admin-Token` | no | routes 404 |
 | `MDL_RATE_LIMIT` | Requests/minute per client IP on `/api/v1/*` (health exempt) | no | `0` (off) |
@@ -140,6 +141,15 @@ import time (no dotenv loader — set them in the shell or a process manager).
 - **SQL cache keeps expired rows** — change detection compares against them.
   `SQLCache.prune()` drops rows expired > 7 days.
 - **Never return `_auth` from a route** — it holds the access/refresh tokens.
+- **Logging**: library code logs only through `log` (`logging.getLogger("mdlaw")`)
+  — upstream calls at INFO (WARNING for 5xx/transport errors), cache/throttle at
+  DEBUG. Never log tokens or passwords. The CLI (`-v`/`-vv`) and the server
+  (`MDL_LOG_LEVEL`) attach handlers; don't `print()` from library code.
+- **CLI**: argparse in `_build_parser()`. A new command needs a parser entry, a
+  branch in `_call()`, and a renderer in `_RENDERERS` (`_render_generic` is the
+  fallback). Output is text on a TTY and JSON when piped, so keep JSON output
+  raw. Errors are `_CLIError` or `HTTPException`, explained by `_explain()` as
+  `error:` + `hint:`. Exit codes: 1 runtime, 2 usage.
 - **CLI session**: `mdlaw auth` saves to `~/.mdlaw_auth.json` (chmod 600);
   `MDL()` and later CLI calls auto-load it. Only the CLI (or a process that
   loaded that file) writes it — the server never puts tokens on disk.

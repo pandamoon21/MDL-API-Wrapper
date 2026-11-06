@@ -70,14 +70,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `limit` 1–100, ids ≥ 1, `q` 1–200 characters. The 200-character cap also
   keeps cache keys within the MySQL key column.
 - The CLI help no longer says the server defaults to `httpx`.
+- CLI: bad arguments (`title abc`, `--page` without a value) give exit code 2
+  with a usage hint instead of a Python traceback. `leaderboard` and
+  `watchlist` reject unknown periods/statuses instead of silently ignoring
+  them.
 
 ### Added
 
+- CLI rewrite (argparse) focused on readable output and clear errors:
+  - Text tables and cards on a terminal; raw JSON when piped (unchanged for
+    scripts). Force either with `--json` / `-o json` or `-o text`, and cap rows
+    with `-n`.
+  - Dedicated views for genres, languages, calendar (grouped by day, `--days`),
+    search (next-page hint), people, title, leaderboard (rank movement),
+    profile and watchlist. Unknown shapes fall back to a generic table.
+  - Errors are one line plus a hint with the next step (`mdlaw auth`, "check
+    the id", …), with no traceback unless `-vv`. "Did you mean" for mistyped
+    commands.
+  - Exit codes: 1 runtime, 2 usage, 130 Ctrl+C.
+  - `-v` logs each upstream request (method, path, status, time, size) and
+    auth events. `-vv` adds cache hits/misses and throttle waits.
+  - Spinner for slow calls on a TTY.
+  - `auth status` shows token state in plain words and has a `--json` form
+    without tokens. `auth --password-stdin` keeps passwords out of shell
+    history. `search` gains `--country`, `--type` and `--year`.
+  - Piped output is UTF-8 on Windows, where CJK titles previously failed to
+    encode.
+- Structured logging through the `mdlaw` logger. The server prints lines in
+  uvicorn's format; set the level with `MDL_LOG_LEVEL` (or `mdlaw serve -v`).
 - Optional per-IP inbound rate limit: `MDL_RATE_LIMIT` (requests/minute), and
   `MDL_TRUST_PROXY=1` to read the client IP behind Fly or another proxy.
 - `.github/workflows/ci.yml` runs ruff and pytest on Python 3.10–3.13. It is
   manual only (`workflow_dispatch`) and never triggers on its own.
-- 32 new offline regression tests. A `conftest.py` fixture keeps tests away
+- 59 new offline tests (including `tests/test_cli.py`). A `conftest.py` fixture keeps tests away
   from the real `~/.mdlaw_auth.json`.
 - `pyproject.toml`: `dev` extra (`pip install -e .[dev]`), project URLs, and
   ruff config.

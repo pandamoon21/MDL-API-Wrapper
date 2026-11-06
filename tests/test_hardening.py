@@ -201,11 +201,12 @@ def test_server_does_not_write_session_file(tmp_path, monkeypatch):
     assert not (tmp_path / ".mdlaw_auth.json").exists()
 
 
-def test_session_write_failure_only_warns(tmp_path, monkeypatch, capsys):
+def test_session_write_failure_only_warns(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(mdlaw, "_PERSIST_AUTH", True)
     monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(tmp_path / "missing-dir" / "s.json"))
-    mdlaw._save_auth()  # must not raise
-    assert "could not save session" in capsys.readouterr().err
+    with caplog.at_level("WARNING", logger="mdlaw"):
+        mdlaw._save_auth()  # must not raise
+    assert "could not save session" in caplog.text
 
 
 def test_cli_session_file_written(tmp_path, monkeypatch):

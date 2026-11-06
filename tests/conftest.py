@@ -15,6 +15,10 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
     monkeypatch.setattr(mdlaw, "MIN_INTERVAL", 0.0)
     monkeypatch.setattr(mdlaw, "cache", mdlaw.TTLCache())
+    # logger: the CLI/server attach handlers; start every test unconfigured
+    monkeypatch.setattr(mdlaw.log, "handlers", [])
+    monkeypatch.setattr(mdlaw.log, "propagate", True)
+    monkeypatch.setattr(mdlaw.log, "level", 0)
     saved = dict(mdlaw._auth)
     mdlaw._auth.update(token=None, refresh_token=None, expires_at=0.0, user=None,
                        username=None, login_error=None)

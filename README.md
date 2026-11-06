@@ -101,53 +101,98 @@ Interactive docs (Swagger UI): **http://localhost:8000/docs**
 
 ## 🖥 CLI
 
-`mdlaw` is also a one-shot CLI — print JSON directly to the terminal (no
-server needed). Works after `pip install mdlaw`:
+`mdlaw` is also a CLI (no server needed). Works after `pip install mdlaw`.
+On a terminal it prints readable tables and cards; piped, it prints JSON, so
+scripts like `mdlaw genres | jq` keep working.
 
 ```bash
-mdlaw --help                     # show all commands
-mdlaw auth                       # log in once, save session to ~/.mdlaw_auth.json
-mdlaw auth you@example.com hunter2   # one-liner login, no prompts
-mdlaw auth status                # show saved session (user, token expiry)
-mdlaw logout                     # remove the saved session
-mdlaw genres                     # all genres
-mdlaw search "crash landing"     # search titles (requires auth)
-mdlaw search "crash landing" --page 2  # page 2 of results
-mdlaw search-people "lee minho"  # search people (requires auth)
-mdlaw search-people "lee minho" --page 2
-mdlaw title 686                  # title detail (requires auth)
-mdlaw people 12345               # actor/crew profile
-mdlaw watchlist completed        # your watchlist (requires auth)
-mdlaw watchlist                  # full watchlist (requires auth)
-mdlaw me                         # your profile (requires auth)
-mdlaw leaderboard weekly         # period: alltime | weekly | monthly
-mdlaw languages                  # supported languages
-mdlaw calendar                   # upcoming episodes
+mdlaw --help                       # all commands; `mdlaw <command> --help` for details
+mdlaw auth                         # log in once (prompts; saves ~/.mdlaw_auth.json, chmod 600)
+mdlaw auth status                  # account, token state, session file — never the token
+mdlaw logout                       # remove the saved session
+mdlaw genres                       # all genres
+mdlaw languages                    # supported languages
+mdlaw calendar --days 3            # what airs in the next 3 days, grouped by day
+mdlaw people 14352                 # actor / crew profile
+mdlaw leaderboard weekly -n 10     # top 10 actors this week
+mdlaw search "crash landing"       # * search titles (--page, --country, --type, --year)
+mdlaw search-people "lee min ho"   # * search actors and crew
+mdlaw title 686                    # * title detail
+mdlaw watchlist completed          # * your list (completed|dropped|onhold|plantowatch|…)
+mdlaw me                           # * your profile
 ```
 
-Output is pretty-printed JSON. Auth-gated commands need a session — either
-log in once with `mdlaw auth` (one-liner `mdlaw auth <user> <pass>` or
-prompts; saves to `~/.mdlaw_auth.json` chmod 600, then **reuses +
-auto-refreshes the token**), or set `MDL_USERNAME`/`MDL_PASSWORD` env vars:
+`*` = needs an account (`mdlaw auth`, or `MDL_USERNAME`/`MDL_PASSWORD`). The
+saved token is reused and refreshed automatically.
+
+**What it looks like**
+
+```text
+$ mdlaw leaderboard weekly -n 3
+#  Move  Name           Nationality  Flowers  ID
+─  ────  ─────────────  ───────────  ───────  ─────
+1  ▲1    Hou Ming Hao   Chinese      5,695    14831
+2  ▼1    Chen Zhe Yuan  Chinese      4,895    14352
+3  ▲1    Zhao Lu Si     Chinese      2,970    18211
+
+weekly leaderboard · profile: mdlaw people <ID>
+showing 3 of 100 · -n 0 shows all
+
+$ mdlaw people 14352
+Chen Zhe Yuan (陈哲远)
+
+Nationality  Chinese
+Born         1996-10-29
+Flowers      946,582
+Rank         #1
+Link         https://mydramalist.com/people/14352-chen-zhe-yuan
+
+Chen Zhe Yuan is a Chinese actor and singer …
+```
+
+**Output options** (before or after the command):
+
+| Option | Effect |
+|---|---|
+| `--json` / `-o json` | raw upstream JSON (default when piped) |
+| `-o text` | tables/cards even when piped |
+| `-n N`, `--limit N` | max rows in text output (`0` = all) |
+| `-v` | log each upstream request to stderr: `GET /people/14352 -> 200 (344 ms, 1.3 KB)`, plus login/refresh events |
+| `-vv` | also cache hits/misses, throttle waits, and full tracebacks |
+| `--transport httpx` | use plain httpx instead of `curl_cffi` |
+
+**Errors** go to stderr as one line, plus a hint with the next step. There is
+no traceback unless you pass `-vv`:
+
+```text
+$ mdlaw title 686
+error: saved session expired and could not be refreshed
+hint:  log in again with `mdlaw auth`
+
+$ mdlaw serch crash
+error: unknown command 'serch'
+hint:  did you mean `mdlaw search`?
+```
+
+Exit codes: `0` ok · `1` API/network error · `2` bad usage · `130` Ctrl+C.
+
+**Logging in from scripts:** `mdlaw auth <user> <pass>` works, but the
+password ends up in your shell history. Prefer the prompt, or:
 
 ```bash
-mdlaw auth you@example.com hunter2   # one-liner, no prompts
-mdlaw me                         # uses the saved token — no env needed
-MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 mdlaw search "crash landing"
+printf '%s\n' "$MDL_PASSWORD" | mdlaw auth you@example.com --password-stdin
 ```
 
-The CLI defaults to the `curl_cffi` transport (passes Cloudflare from flagged
-IPs); override with `--transport httpx` if you prefer.
+**Server:** `mdlaw serve --host 127.0.0.1 --port 9000`. Running `mdlaw` with
+no command also starts it. Defaults come from the `HOST`/`PORT` env vars, else
+`0.0.0.0:8000`. Server logs use uvicorn's format; set `MDL_LOG_LEVEL=DEBUG`
+(or `mdlaw serve -v`) to see cache activity:
 
-Start the server with a custom bind address (defaults: `HOST`/`PORT` env vars,
-else `0.0.0.0:8000`):
-
-```bash
-mdlaw serve --host 127.0.0.1 --port 9000
+```text
+INFO:     mdlaw: transport=curl_cffi cache=memory auth=off
+INFO:     mdlaw: GET /genres -> 200 (344 ms, 1.5 KB)
+INFO:     127.0.0.1:62054 - "GET /api/v1/genres HTTP/1.1" 200 OK
 ```
-
-Errors print a clean `error: ...` message to stderr with exit code 1 — no
-tracebacks.
 
 ## 🐍 Use as a Python package
 
@@ -586,6 +631,7 @@ Everything `mdlaw` needs is set via environment variables. Here's the full pictu
 | `MDL_PASSWORD` | No | Password for the account above (paired with `MDL_USERNAME`) | disabled |
 | `MDL_CACHE_BACKEND` | No | `memory` · `sqlite` · `mysql` · `postgres` | `memory` |
 | `MDL_CACHE_DB_URL` | Only if backend ≠ memory | DSN, e.g. `sqlite:///mdlaw_cache.db` | — |
+| `MDL_LOG_LEVEL` | No | Server log level for `mdlaw:` lines (`DEBUG`, `INFO`, `WARNING`) | `INFO` |
 | `MDL_CACHE_MAX_ENTRIES` | No | Max entries in the in-memory cache (LRU eviction) | `10000` |
 | `MDL_ADMIN_TOKEN` | No | Enables `POST /api/v1/auth/{login,refresh}` (send as `X-Admin-Token`); unset → those routes 404 | disabled |
 | `MDL_RATE_LIMIT` | No | Max requests/minute per client IP on `/api/v1/*` (health exempt); `0` = off | `0` |
@@ -850,7 +896,8 @@ mdlaw/
 ├── tests/
 │   ├── conftest.py     # isolation fixture (no real session file, fresh state)
 │   ├── test_mdlaw.py   # core offline checks
-│   └── test_hardening.py  # auth / error-handling / cache regression tests
+│   ├── test_hardening.py  # auth / error-handling / cache regression tests
+│   └── test_cli.py     # CLI output, errors, exit codes, logging
 ├── .github/workflows/
 │   ├── docker.yml      # GHCR image on version tags
 │   └── ci.yml          # ruff + pytest (manual trigger only)

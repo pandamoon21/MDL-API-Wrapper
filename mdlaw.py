@@ -10,15 +10,21 @@ Self-check:  python mdlaw.py self   (offline)
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import secrets
+import shlex
+import shutil
 import string
 import sys
+import textwrap
 import threading
 import time
+import unicodedata
 import uuid
 import weakref
 from collections import OrderedDict
@@ -52,6 +58,11 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
 __version__ = "1.7.0"
+
+# Library code only logs to this logger. The CLI (-v / -vv) and the server
+# (MDL_LOG_LEVEL) attach handlers; library users configure it themselves.
+# Never log tokens or passwords.
+log = logging.getLogger("mdlaw")
 
 # Header scheme: without User-Agent + Accept-Language + Accept the API
 # returns 403 (Cloudflare WAF).
@@ -402,6 +413,7 @@ async def _throttle() -> None:
     async with _state().out_lock:
         wait = MIN_INTERVAL - (time.monotonic() - _last_out)
         if wait > 0:
+            log.debug("throttle: waiting %.2fs before the next request", wait)
             await asyncio.sleep(wait)
         _last_out = time.monotonic()
 
@@ -456,10 +468,39 @@ async def close_client() -> None:
     st.httpx = None
 
 
+class _UvicornStyleFormatter(logging.Formatter):
+    """`INFO:     mdlaw: ...` — lines up with uvicorn's own log lines."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return f"{record.levelname + ':':<10}mdlaw: {record.getMessage()}"
+
+
+def _setup_server_logging() -> None:
+    """Server log lines in uvicorn's style (``INFO:     mdlaw: ...``). Level
+    from MDL_LOG_LEVEL (default INFO). Leaves an already-configured logger
+    alone, so a host app's logging config wins."""
+    if log.handlers:
+        return
+    name = os.environ.get("MDL_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    level = logging.getLevelName(name)
+    if not isinstance(level, int):
+        level = logging.INFO
+    h = logging.StreamHandler()
+    h.setFormatter(_UvicornStyleFormatter())
+    log.addHandler(h)
+    log.setLevel(level)
+    log.propagate = False
+    if not isinstance(logging.getLevelName(name), int):
+        log.warning("MDL_LOG_LEVEL=%s is not a log level; using INFO", name)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Startup/shutdown: nothing to init (client is lazy); close the upstream
+    """Startup/shutdown: set up logging (client is lazy); close the upstream
     client on shutdown so uvicorn/gunicorn can restart cleanly."""
+    _setup_server_logging()
+    log.info("transport=%s cache=%s auth=%s", TRANSPORT, cache.label,
+             "on" if auth_enabled() else "off")
     yield
     await close_client()
 
@@ -491,14 +532,26 @@ async def _send(method: str, path: str, headers: dict | None = None,
     the HTTP status is left for _parse() to judge."""
     async with _state().sem:
         await _throttle()
+        t0 = time.monotonic()
         try:
-            return await get_client().request(method, _url(path), headers=headers, json=body)
+            r = await get_client().request(method, _url(path), headers=headers, json=body)
         except _TIMEOUT_ERRORS as e:
+            log.warning("%s %s timed out after %.1fs", method, path, time.monotonic() - t0)
             raise HTTPException(504, {"error": True, "code": 504,
                                       "detail": "upstream timeout"}) from e
         except _TRANSPORT_ERRORS as e:
+            log.warning("%s %s failed: %s", method, path, e)
             raise HTTPException(502, {"error": True, "code": 502,
                                       "detail": f"upstream error: {e}"}) from e
+    ms = (time.monotonic() - t0) * 1000
+    level = logging.WARNING if r.status_code >= 500 else logging.INFO
+    log.log(level, "%s %s -> %d (%.0f ms, %s)", method, path, r.status_code, ms,
+            _size(len(r.content or b"")))
+    return r
+
+
+def _size(n: int) -> str:
+    return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB"
 
 
 def _parse(r: Any) -> object:
@@ -533,7 +586,9 @@ async def fetch(method: str, path: str, ttl: float,
     key = cache_key or f"{method} {path}"
     hit = await _cache_call(cache.get, key)
     if hit is not None:
+        log.debug("cache hit: %s", key)
         return hit
+    log.debug("cache miss: %s", key)
     if auth and not auth_enabled():
         raise HTTPException(400, {"error": True, "code": 400,
                                   "detail": "this endpoint requires MDL_USERNAME and "
@@ -542,7 +597,9 @@ async def fetch(method: str, path: str, ttl: float,
     # each queueing behind the throttle.
     inflight = _state().inflight
     task = inflight.get(key)
-    if task is None:
+    if task is not None:
+        log.debug("joining in-flight request: %s", key)
+    else:
         task = asyncio.ensure_future(_fetch_upstream(method, path, ttl, body, key, auth))
         inflight[key] = task
 
@@ -560,6 +617,7 @@ async def _fetch_upstream(method: str, path: str, ttl: float, body: dict | None,
     sent_token = _auth["token"]
     r = await _send(method, path, headers, body)
     if r.status_code == 401 and auth and auth_enabled():
+        log.info("upstream rejected the token (401); refreshing and retrying once")
         await refresh(stale_token=sent_token)
         r = await _send(method, path, await auth_headers(), body)
     data = _parse(r)
@@ -654,6 +712,7 @@ async def _login_locked() -> dict:
                                                 "refreshed — run `mdlaw auth` again"})
         raise HTTPException(400, {"error": True, "code": 400,
                                   "detail": "MDL_USERNAME/MDL_PASSWORD not set"})
+    log.info("logging in as %s", MDL_USERNAME)
     try:
         data = await _auth_request(
             "POST", _qs("/auth/login", device_id=_auth["device_id"]),
@@ -667,6 +726,7 @@ async def _login_locked() -> dict:
             _auth["username"] = MDL_USERNAME
             _auth["login_error"] = None
             _auth["last_login"] = time.time()
+            log.info("login ok; token valid for %s", _fmt_duration(_auth["expires_at"] - time.time()))
             _save_auth()
             return _auth
         # No token: distinguish real 2FA (distinct response keys / code 428)
@@ -719,6 +779,7 @@ async def refresh(stale_token: object = _ANY) -> dict:
             return _auth
         if not _auth["refresh_token"]:
             return await _login_locked()
+        log.info("refreshing access token")
         try:
             data = await _auth_request(
                 "POST", _qs("/auth/refresh", device_id=_auth["device_id"]),
@@ -730,8 +791,13 @@ async def refresh(stale_token: object = _ANY) -> dict:
             _set_tokens(data)
             _auth["last_refresh"] = time.time()
             _auth["refreshes"] += 1
+            log.info("token refreshed; valid for %s", _fmt_duration(_auth["expires_at"] - time.time()))
             _save_auth()
-        except HTTPException:
+        except HTTPException as e:
+            if _has_credentials():
+                log.warning("token refresh failed (HTTP %d); logging in again", e.status_code)
+            else:
+                log.info("token refresh failed (HTTP %d)", e.status_code)
             return await _login_locked()
         return _auth
 
@@ -777,7 +843,20 @@ def _save_auth() -> None:
         except OSError:
             pass
     except OSError as e:
-        print(f"warning: could not save session to {_AUTH_FILE}: {e}", file=sys.stderr)
+        log.warning("could not save session to %s: %s", _AUTH_FILE, e)
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Human duration: '3d 4h', '5h 12m', '42m', 'under a minute'."""
+    s = int(abs(seconds))
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}d {h}h" if h else f"{d}d"
+    if h:
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{m}m" if m else "under a minute"
 
 
 def _load_auth() -> bool:
@@ -1425,193 +1504,834 @@ def self_check() -> int:
     return 0
 
 
-_CLI_USAGE = """\
-mdlaw — MyDramaList API wrapper CLI
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+# Output: readable tables/cards on a terminal, raw JSON when piped (so
+# `mdlaw genres | jq` keeps working) — override with --json / -o text.
+# Errors: one "error:" line plus a "hint:" with the next step; exit codes
+# 0 ok · 1 API/runtime error · 2 bad usage · 130 interrupted.
+# Logs: -v shows each upstream request (status, time, size) and auth events;
+# -vv adds cache hits/misses, throttle waits and tracebacks.
 
-Usage:
-  mdlaw [command] [args...]
+_EPILOG = """\
+examples:
+  mdlaw auth                        log in once (prompts for the password)
+  mdlaw search "crash landing"      search titles
+  mdlaw title 686                   title detail
+  mdlaw people 14352                actor profile
+  mdlaw calendar --days 3           episodes airing in the next 3 days
+  mdlaw leaderboard weekly -n 10    top 10 actors this week
+  mdlaw genres --json | jq '.[].name'
+  mdlaw -v me                       show the requests being made
 
-Commands:
-  auth                      Log in and save the session to ~/.mdlaw_auth.json.
-                            One-liner: `mdlaw auth <user> <pass>` (no prompts);
-                            also reads MDL_USERNAME/MDL_PASSWORD env vars, then
-                            falls back to interactive prompts. Later commands
-                            reuse the saved token and auto-refresh it.
-  auth status               Show saved session info (user, token expiry).
-  logout                    Remove the saved session.
-  genres                    List all genres.
-  languages                 List supported languages.
-  calendar                  Upcoming episodes.
-  search <query> [--page N]    Search titles (requires auth). Default page 1.
-  search-people <name> [--page N]   Search people (requires auth).
-  title <id>                Title detail (requires auth).
-  people <id>               Actor/crew profile.
-  watchlist [status]        Your watchlist (requires auth).
-  me                        Your profile (requires auth).
-  leaderboard [period]      Period: alltime | weekly | monthly.
-  self                      Offline self-check.
-  serve | run [--host H] [--port P]
-                            Start the HTTP server (default when no command).
-                            Defaults: HOST/PORT env vars, else 0.0.0.0:8000.
-
-Options:
-  -h, --help                Show this help.
-  --transport <httpx|curl_cffi>   Transport override (CLI default: curl_cffi).
-
-Environment:
-  MDL_USERNAME / MDL_PASSWORD     Account credentials (alternative to `auth`).
-  MDL_TRANSPORT                   Transport: curl_cffi (default) or httpx.
+Output is a table on a terminal and JSON when piped; force either with
+--json or -o text. Commands marked * need an account (mdlaw auth).
 """
 
+_WATCH_STATUSES = ("completed", "dropped", "onhold", "plantowatch",
+                   "notinterested", "undecided")
 
-def _run_cli(args: list[str]) -> int:
-    """One-shot data commands: mdlaw genres, mdlaw search 'q', mdlaw title 686 ..."""
-    import asyncio
-    import json as _json
-    import sys
 
-    # --transport overrides MDL_TRANSPORT (default curl_cffi) for this run.
-    global TRANSPORT
-    if args and args[0] == "--transport":
-        if len(args) < 2:
-            print("error: --transport requires httpx or curl_cffi", file=sys.stderr)
-            return 1
-        TRANSPORT = args[1].lower()
-        args = args[2:]
-    if args and args[0] in ("-h", "--help"):
-        print(_CLI_USAGE)
-        return 0
-    if not args:
-        print(_CLI_USAGE)
-        return 0
+class _CLIError(Exception):
+    """A user-facing failure: message + optional hint, no traceback."""
 
-    cmd, rest = args[0], args[1:]
+    def __init__(self, message: str, hint: str | None = None, code: int = 1) -> None:
+        super().__init__(message)
+        self.message, self.hint, self.code = message, hint, code
 
-    if cmd == "auth":
-        return _cli_auth(rest)
-    if cmd == "logout":
-        return _cli_logout()
 
-    # Load the saved session for auth-gated commands.
-    if not auth_enabled():
-        _load_auth()
+# -- argument parsing -------------------------------------------------------
+class _Parser(argparse.ArgumentParser):
+    """argparse with mdlaw-style errors: `error:` + `hint:`, a short usage
+    line, and a did-you-mean for mistyped commands."""
 
-    async def call():
-        mdl = MDL()
-        try:
-            if cmd == "genres":
-                return await mdl.genres()
-            if cmd == "languages":
-                return await mdl.languages()
-            if cmd == "calendar":
-                return await mdl.calendar()
-            if cmd == "search":
-                if not rest:
-                    raise SystemExit("usage: mdlaw search <query> [--page N]")
-                page = 1
-                q = " ".join(rest)
-                if "--page" in rest:
-                    i = rest.index("--page")
-                    page = int(rest[i + 1])
-                    q = " ".join(rest[:i])
-                return await mdl.search(q, page=page)
-            if cmd == "search-people":
-                if not rest:
-                    raise SystemExit("usage: mdlaw search-people <name> [--page N]")
-                page = 1
-                q = " ".join(rest)
-                if "--page" in rest:
-                    i = rest.index("--page")
-                    page = int(rest[i + 1])
-                    q = " ".join(rest[:i])
-                return await mdl.search_people(q, page=page)
-            if cmd == "title":
-                if not rest:
-                    raise SystemExit("usage: mdlaw title <id>")
-                return await mdl.title(int(rest[0]))
-            if cmd == "people":
-                if not rest:
-                    raise SystemExit("usage: mdlaw people <id>")
-                return await mdl.people(int(rest[0]))
-            if cmd == "watchlist":
-                return await mdl.watchlist(rest[0] if rest else None)
-            if cmd == "me":
-                return await mdl.me()
-            if cmd == "leaderboard":
-                return await mdl.leaderboard(rest[0] if rest else "alltime")
-            raise SystemExit(f"unknown command: {cmd}")
-        finally:
-            await mdl.close()
+    def error(self, message: str) -> None:  # type: ignore[override]
+        import difflib
+        import re
+        m = re.search(r"argument <command>: invalid choice: '([^']*)'", message)
+        if m:
+            choices = [c for c in self._commands()]
+            near = difflib.get_close_matches(m.group(1), choices, n=1)
+            _print_error(f"unknown command '{m.group(1)}'",
+                         f"did you mean `mdlaw {near[0]}`?" if near
+                         else "run `mdlaw --help` to see all commands")
+        else:
+            print(self.format_usage().rstrip(), file=sys.stderr)
+            _print_error(message, f"see `{self.prog} --help`")
+        sys.exit(2)
 
+    def _commands(self) -> list[str]:
+        for a in self._actions:
+            if isinstance(a, argparse._SubParsersAction):
+                return list(a.choices)
+        return []
+
+
+def _short_usage(p: argparse.ArgumentParser) -> str:
+    """`mdlaw title [options] id` — leave the global options to --help."""
+    parts = []
+    for a in p._actions:
+        if a.option_strings or isinstance(a, argparse._SubParsersAction):
+            continue
+        name = a.metavar or a.dest
+        if a.choices and not a.metavar:
+            name = "{" + ",".join(a.choices) + "}"
+        parts.append(f"[{name}]" if a.nargs == "?" else
+                     f"{name} [{name} ...]" if a.nargs == "+" else name)
+    return " ".join(["%(prog)s", "[options]"] + parts)
+
+
+def _positive_int(text: str) -> int:
     try:
-        data = asyncio.run(call())
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {n}")
+    return n
+
+
+def _limit(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {text!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be 0 (all) or more")
+    return n
+
+
+def _add_output_options(p: argparse.ArgumentParser, sub: bool) -> None:
+    """Global options, accepted before or after the command. On subparsers
+    the defaults are SUPPRESSed so they don't overwrite the main parser's."""
+    d = argparse.SUPPRESS if sub else None
+    g = p.add_argument_group("output options")
+    g.add_argument("-o", "--output", choices=("auto", "text", "json"),
+                   default=d if sub else "auto",
+                   help="auto (default): text on a terminal, JSON when piped")
+    g.add_argument("--json", dest="output", action="store_const", const="json",
+                   default=argparse.SUPPRESS, help="shorthand for -o json")
+    g.add_argument("-n", "--limit", type=_limit, default=d,
+                   help="max rows in text output (0 = all)")
+    g.add_argument("-v", "--verbose", action="count", default=d if sub else 0,
+                   help="-v: log requests and auth; -vv: also cache/throttle and tracebacks")
+    g.add_argument("--transport", choices=("curl_cffi", "httpx"), default=d,
+                   help="upstream HTTP stack (default: MDL_TRANSPORT or curl_cffi)")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    fmt = argparse.RawDescriptionHelpFormatter
+    parser = _Parser(
+        prog="mdlaw", formatter_class=fmt, epilog=_EPILOG,
+        description="MyDramaList from the command line (unofficial; uses the MDL app API).")
+    parser.add_argument("--version", action="version", version=f"mdlaw {__version__}")
+    _add_output_options(parser, sub=False)
+    sp = parser.add_subparsers(dest="command", metavar="<command>")
+
+    def cmd(name: str, help_: str, **kw) -> argparse.ArgumentParser:
+        desc = (help_[2:] + " — needs a MyDramaList account (log in with `mdlaw auth`)"
+                if help_.startswith("* ") else help_)
+        p = sp.add_parser(name, help=help_, description=desc, formatter_class=fmt, **kw)
+        _add_output_options(p, sub=True)
+        made.append(p)
+        return p
+    made: list[argparse.ArgumentParser] = []
+
+    p = cmd("auth", "log in and save the session, or show it (auth status)")
+    p.add_argument("username", nargs="?",
+                   help="MDL username or email; `status` shows the saved session")
+    p.add_argument("password", nargs="?",
+                   help="password (avoid: it ends up in shell history — use the prompt)")
+    p.add_argument("--password-stdin", action="store_true",
+                   help="read the password from stdin (for scripts)")
+    cmd("logout", "remove the saved session")
+    cmd("genres", "list all genres")
+    cmd("languages", "list supported languages")
+    p = cmd("calendar", "upcoming episodes and releases")
+    p.add_argument("--days", type=_positive_int, default=7,
+                   help="how many days ahead to show in text output (default 7)")
+    p = cmd("search", "* search titles")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--page", type=_positive_int, default=1)
+    p.add_argument("--country", help="keep only this country, e.g. 'South Korea'")
+    p.add_argument("--type", help="keep only this type, e.g. Drama or Movie")
+    p.add_argument("--year", type=_positive_int, help="keep only this release year")
+    p = cmd("search-people", "* search actors and crew")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--page", type=_positive_int, default=1)
+    p = cmd("title", "* title detail")
+    p.add_argument("id", type=_positive_int, help="title id (from search results)")
+    p = cmd("people", "actor / crew profile")
+    p.add_argument("id", type=_positive_int, help="person id")
+    p = cmd("watchlist", "* your watchlist")
+    p.add_argument("status", nargs="?", choices=_WATCH_STATUSES)
+    cmd("me", "* your profile")
+    p = cmd("leaderboard", "most popular actors")
+    p.add_argument("period", nargs="?", default="alltime",
+                   choices=("alltime", "weekly", "monthly"))
+    cmd("self", "offline self-check")
+    p = cmd("serve", "start the HTTP API server (default when no command is given)",
+            aliases=["run"])
+    p.add_argument("--host", help="bind address (default: HOST env or 0.0.0.0)")
+    p.add_argument("--port", help="port (default: PORT env or 8000)")
+    for p in made:
+        p.usage = _short_usage(p)
+    return parser
+
+
+# -- terminal output helpers ------------------------------------------------
+def _ensure_utf8_stdio() -> None:
+    """Piped output on Windows defaults to the ANSI code page, which can't
+    encode Korean/Chinese titles. JSON consumers expect UTF-8 anyway."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc != "utf8":
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
+
+
+def _term_width() -> int:
+    return max(40, shutil.get_terminal_size((100, 24)).columns)
+
+
+def _dw(text: str) -> int:
+    """Display width: CJK / full-width characters take two columns."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else
+               0 if unicodedata.combining(c) else 1 for c in text)
+
+
+def _fit(text: str, width: int) -> str:
+    """Truncate to ``width`` display columns (with …) and pad to it."""
+    if _dw(text) > width:
+        out, w = [], 0
+        for c in text:
+            cw = _dw(c)
+            if w + cw > width - 1:
+                break
+            out.append(c)
+            w += cw
+        text = "".join(out) + "…"
+    return text + " " * (width - _dw(text))
+
+
+def _table(headers: list[str], rows: list[list[object]], flex: int = 1) -> list[str]:
+    """Aligned columns; column ``flex`` shrinks to fit the terminal width."""
+    cells = [[_clean(c) for c in row] for row in rows]
+    widths = [max([_dw(h)] + [_dw(r[i]) for r in cells]) for i, h in enumerate(headers)]
+    over = sum(widths) + 2 * (len(widths) - 1) - _term_width()
+    if over > 0:
+        widths[flex] = max(12, widths[flex] - over)
+    gap = "  "
+    lines = [gap.join(_fit(h, w) for h, w in zip(headers, widths)).rstrip(),
+             gap.join("─" * w for w in widths)]
+    lines += [gap.join(_fit(c, w) for c, w in zip(r, widths)).rstrip() for r in cells]
+    return lines
+
+
+def _card(title: str, fields: list[tuple[str, object]], body: str | None = None,
+          subtitle: str | None = None) -> list[str]:
+    """Heading, aligned label/value rows, then wrapped body text."""
+    lines = [title]
+    if subtitle:
+        lines.append(subtitle)
+    shown = [(k, _clean(v)) for k, v in fields if _clean(v)]
+    if shown:
+        lines.append("")
+        lw = max(_dw(k) for k, _ in shown)
+        vw = max(20, _term_width() - lw - 2)
+        for k, v in shown:
+            wrapped = textwrap.wrap(v, vw) or [""]
+            lines.append(f"{k}{' ' * (lw - _dw(k))}  {wrapped[0]}")
+            lines += [" " * (lw + 2) + w for w in wrapped[1:]]
+    if body:
+        lines.append("")
+        for para in str(body).replace("\r", "").split("\n"):
+            lines += textwrap.wrap(para, min(_term_width(), 100)) or [""]
+    return lines
+
+
+_EMPTY = (None, "", "0000-00-00", "0001-01-01", [], {})
+
+
+def _clean(v: object) -> str:
+    if v in _EMPTY:
+        return ""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, float):
+        return f"{v:g}"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, (list, tuple)):
+        return ", ".join(_clean(x.get("name") if isinstance(x, dict) else x) for x in v)
+    return " ".join(str(v).split())
+
+
+def _num(v: object) -> str | None:
+    """Thousands separators for counts (not for ids)."""
+    return f"{v:,}" if isinstance(v, int) and not isinstance(v, bool) and v else None
+
+
+def _pick(d: dict, *keys: str) -> object:
+    for k in keys:
+        v = d.get(k)
+        if v not in _EMPTY:
+            return v
+    return None
+
+
+def _items(data: object, *keys: str) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in keys + ("items", "results", "entries", "data", "titles"):
+            if isinstance(data.get(k), list):
+                return data[k]
+    return []
+
+
+def _limited(rows: list, limit: int | None, default: int | None) -> tuple[list, str | None]:
+    n = default if limit is None else limit
+    if not n or len(rows) <= n:
+        return rows, None
+    return rows[:n], f"showing {n} of {len(rows)} · -n 0 shows all"
+
+
+def _mdl_url(slug: object) -> str | None:
+    if not slug:
+        return None
+    s = str(slug)
+    return s if s.startswith("http") else "https://mydramalist.com/" + s.lstrip("/")
+
+
+def _year(d: dict) -> str:
+    y = _pick(d, "year", "released_year")
+    if y:
+        return str(y)
+    date = _pick(d, "released", "aired_start", "release_date")
+    return str(date)[:4] if date else ""
+
+
+def _rating(d: dict) -> str:
+    r = _pick(d, "rating", "score")
+    try:
+        return f"{float(r):.1f}" if r and float(r) > 0 else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+# -- renderers: data → list of lines ----------------------------------------
+def _render_genres(data: object, args) -> list[str]:
+    rows = [[g.get("id"), g.get("name")] for g in _items(data) if isinstance(g, dict)]
+    return _table(["ID", "Genre"], rows) + ["", f"{len(rows)} genres"]
+
+
+def _render_languages(data: object, args) -> list[str]:
+    langs = _items(data, "languages")
+    rows = [[x.get("code"), x.get("name"), x.get("native_name")] for x in langs
+            if isinstance(x, dict)]
+    return _table(["Code", "Language", "Native name"], rows) + ["", f"{len(rows)} languages"]
+
+
+def _render_calendar(data: object, args) -> list[str]:
+    rels = {r.get("id"): r for r in _items(data, "relationships") if isinstance(r, dict)}
+    start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))  # local midnight
+    end = start + args.days * 86400
+    items = sorted((i for i in _items(data) if isinstance(i, dict)
+                    and start <= (i.get("released_at") or 0) < end),
+                   key=lambda i: (i["released_at"],
+                                  str((rels.get(i.get("rid")) or {}).get("title") or ""),
+                                  i.get("episode_number") or 0))
+    if not items:
+        return [f"Nothing scheduled in the next {args.days} day(s)."]
+    out: list[str] = []
+    day = None
+    for it in items:
+        lt = time.localtime(it["released_at"])
+        if lt[:3] != day:
+            day = lt[:3]
+            if out:
+                out.append("")
+            out.append(time.strftime("%A %d %B %Y", lt))
+        rel = rels.get(it.get("rid")) or rels.get(it.get("id")) or {}
+        ep = it.get("episode_number")
+        what = f"ep {ep}" if ep else (rel.get("type") or "")
+        line = f"  {time.strftime('%H:%M', lt)}  {_fit(_clean(rel.get('title') or it.get('permalink')), 40)}" \
+               f"  {_fit(what, 8)}  {_clean(rel.get('country'))}"
+        out.append(line.rstrip())
+    out += ["", f"{len(items)} releases in the next {args.days} day(s) (local time) · "
+                f"--days N to change"]
+    return out
+
+
+def _render_search(data: object, args) -> list[str]:
+    items = [i for i in _items(data) if isinstance(i, dict)]
+    if not items:
+        return ["No titles found."]
+    rows = [[i.get("id"), _pick(i, "title", "name"), _year(i),
+             _pick(i, "media_type", "type", "content_type"), _pick(i, "country", "language"),
+             _rating(i)] for i in items]
+    rows, more = _limited(rows, args.limit, None)
+    q = " ".join(args.query)
+    out = _table(["ID", "Title", "Year", "Type", "Country", "Rating"], rows)
+    out += ["", f"page {args.page} · details: mdlaw title <ID> · next page: "
+                f"mdlaw search {shlex.quote(q)} --page {args.page + 1}"]
+    return out + ([more] if more else [])
+
+
+def _render_search_people(data: object, args) -> list[str]:
+    items = [i for i in _items(data) if isinstance(i, dict)]
+    if not items:
+        return ["No people found."]
+    rows = [[i.get("id"), _pick(i, "name", "display_name"),
+             _pick(i, "original_name", "native_name"), _pick(i, "nationality", "country")]
+            for i in items]
+    rows, more = _limited(rows, args.limit, None)
+    q = " ".join(args.query)
+    out = _table(["ID", "Name", "Native name", "Nationality"], rows)
+    out += ["", f"page {args.page} · profile: mdlaw people <ID> · next page: "
+                f"mdlaw search-people {shlex.quote(q)} --page {args.page + 1}"]
+    return out + ([more] if more else [])
+
+
+def _render_title(data: object, args) -> list[str]:
+    if not isinstance(data, dict):
+        return _render_generic(data, args)
+    name = _clean(_pick(data, "title", "name")) or f"title {args.id}"
+    year = _year(data)
+    genres = data.get("genres")
+    if isinstance(genres, str):
+        genres = [g.strip() for g in genres.split(",")]
+    rating = _rating(data)
+    votes = _pick(data, "votes", "rating_count")
+    fields = [
+        ("Native title", _pick(data, "original_title", "native_title")),
+        ("Type", _pick(data, "media_type", "type", "content_type")),
+        ("Country", data.get("country")),
+        ("Language", data.get("language")),
+        ("Episodes", data.get("episodes")),
+        ("Rating", f"{rating}/10" + (f" ({_num(votes) or votes} votes)" if votes else "")
+         if rating else None),
+        ("Ranked", f"#{_clean(data['ranking'])}" if data.get("ranking") not in _EMPTY
+         and data.get("ranking") != 99999 else None),
+        ("Genres", genres),
+        ("Aired", _pick(data, "aired", "released", "aired_start")),
+        ("Link", _mdl_url(_pick(data, "permalink", "url", "slug"))),
+    ]
+    return _card(f"{name} ({year})" if year else name, fields,
+                 body=_pick(data, "synopsis", "description"))
+
+
+def _render_people(data: object, args) -> list[str]:
+    if not isinstance(data, dict):
+        return _render_generic(data, args)
+    name = _clean(_pick(data, "name", "display_name")) or f"person {args.id}"
+    native = _clean(data.get("original_name"))
+    fields = [
+        ("Nationality", data.get("nationality")),
+        ("Gender", data.get("gender")),
+        ("Born", data.get("birthday")),
+        ("Died", data.get("dod")),
+        ("Flowers", _num(data.get("flowers"))),
+        ("Rank", f"#{data['ranked']}" if data.get("ranked") else None),
+        ("Link", _mdl_url(data.get("slug")) or _mdl_url(data.get("permalink"))),
+    ]
+    return _card(f"{name} ({native})" if native else name, fields,
+                 body=data.get("biography"))
+
+
+def _render_leaderboard(data: object, args) -> list[str]:
+    entries = [e for e in _items(data, "entries") if isinstance(e, dict)]
+    rows = []
+    for e in entries:
+        now, prev = e.get("ranked"), e.get("previous_rank")
+        move = ""
+        if isinstance(now, int) and isinstance(prev, int) and prev:
+            move = f"▲{prev - now}" if prev > now else f"▼{now - prev}" if now > prev else "="
+        rows.append([now, move, e.get("display_name"), e.get("nationality"),
+                     _num(e.get("total_flowers")), e.get("id")])
+    rows, more = _limited(rows, args.limit, 20)
+    out = _table(["#", "Move", "Name", "Nationality", "Flowers", "ID"], rows, flex=2)
+    out += ["", f"{args.period} leaderboard · profile: mdlaw people <ID>"]
+    return out + ([more] if more else [])
+
+
+def _render_profile(data: object, args) -> list[str]:
+    if not isinstance(data, dict):
+        return _render_generic(data, args)
+    name = _clean(_pick(data, "display_name", "name", "username")) or "profile"
+    user = _clean(data.get("username"))
+    fields = [
+        ("Username", user if user != name else None),
+        ("Location", data.get("location")),
+        ("Gender", data.get("gender")),
+        ("Joined", str(data.get("joined_at") or "")[:10]),
+        ("Followers", _num(data.get("followers"))),
+        ("Following", _num(data.get("following"))),
+        ("Points", _num(data.get("points"))),
+        ("VIP", "yes" if data.get("vip") else None),
+    ]
+    if not any(_clean(v) for _, v in fields):
+        return _render_generic(data, args)
+    return _card(name, fields, body=data.get("about"))
+
+
+def _render_watchlist(data: object, args) -> list[str]:
+    items = [i for i in _items(data, "list", "watchlist") if isinstance(i, dict)]
+    if not items:
+        return _render_generic(data, args) if data not in _EMPTY else ["Your list is empty."]
+    rows = []
+    for i in items:
+        t = i.get("title") if isinstance(i.get("title"), dict) else i
+        rows.append([t.get("id"), _pick(t, "title", "name"), _year(t),
+                     _pick(i, "status", "list_status"), _pick(i, "progress", "episodes_watched"),
+                     _pick(i, "score", "user_rating") or ""])
+    rows, more = _limited(rows, args.limit, None)
+    out = _table(["ID", "Title", "Year", "Status", "Progress", "Score"], rows)
+    return out + ["", f"{len(items)} titles"] + ([more] if more else [])
+
+
+_GENERIC_COLS = (("ID", ("id", "rid")), ("Name", ("title", "name", "display_name", "username")),
+                 ("Year", ("year",)), ("Type", ("media_type", "type")),
+                 ("Country", ("country", "nationality")), ("Status", ("status",)),
+                 ("Rating", ("rating", "score")))
+
+
+def _render_generic(data: object, args) -> list[str]:
+    """Fallback for shapes without a dedicated renderer: a table for lists of
+    objects, label/value rows for an object (skipping URLs and nested data)."""
+    items = _items(data)
+    if items and all(isinstance(i, dict) for i in items):
+        cols = [(h, ks) for h, ks in _GENERIC_COLS if any(_pick(i, *ks) for i in items)]
+        if cols:
+            rows = [[_pick(i, *ks) for _, ks in cols] for i in items]
+            rows, more = _limited(rows, getattr(args, "limit", None), None)
+            flex = next((n for n, (h, _) in enumerate(cols) if h == "Name"), 0)
+            return _table([h for h, _ in cols], rows, flex=flex) + ([more] if more else [])
+    if isinstance(data, dict):
+        fields = [(k.replace("_", " ").capitalize(), v) for k, v in data.items()
+                  if not isinstance(v, (dict, list)) and not str(v).startswith("http")]
+        return _card("", fields)[2:] or ["(no displayable fields — try --json)"]
+    if isinstance(data, list):
+        return [_clean(x) for x in data] or ["No results."]
+    return [_clean(data)]
+
+
+_RENDERERS = {
+    "genres": _render_genres, "languages": _render_languages,
+    "calendar": _render_calendar, "search": _render_search,
+    "search-people": _render_search_people, "title": _render_title,
+    "people": _render_people, "watchlist": _render_watchlist,
+    "me": _render_profile, "leaderboard": _render_leaderboard,
+}
+
+
+# -- errors -----------------------------------------------------------------
+def _explain(e: HTTPException) -> tuple[str, str | None]:
+    """HTTPException → (one-line message, hint with the next step)."""
+    detail = e.detail
+    msg = detail.get("detail", detail) if isinstance(detail, dict) else detail
+    if isinstance(msg, dict):
+        msg = msg.get("message") or msg.get("error_description") or msg.get("error") or \
+            json.dumps(msg, ensure_ascii=False)
+    msg = " ".join(str(msg).split())
+    code = e.status_code
+    if code == 400 and "MDL_USERNAME" in msg and "not set" not in msg:
+        return ("this command needs a MyDramaList account",
+                "log in once with `mdlaw auth` (or set MDL_USERNAME and MDL_PASSWORD)")
+    if code == 400 and "not set" in msg:
+        return ("no MyDramaList account configured",
+                "log in with `mdlaw auth`, or set MDL_USERNAME and MDL_PASSWORD")
+    if code == 401:
+        return (msg.split(" — ")[0] if "mdlaw auth" in msg else f"not authorized: {msg}",
+                "log in again with `mdlaw auth`")
+    if code == 403 and "Cloudflare" in msg:
+        return ("Cloudflare blocked the request (your IP looks like a bot to it)",
+                "retry with `--transport curl_cffi`, or from another network")
+    if code == 404:
+        return "not found on MyDramaList (HTTP 404)", "check the id — ids come from search results"
+    if code == 428:
+        return "this account has two-factor authentication enabled", \
+            "mdlaw can't complete 2FA logins; disable 2FA or use an app password"
+    if code == 429:
+        return "MyDramaList is rate-limiting requests (HTTP 429)", "wait a minute and try again"
+    if code == 504:
+        return "MyDramaList did not respond in time", "try again; -v shows the request timings"
+    if code == 502:
+        return f"could not reach MyDramaList: {msg}", "check your connection and try again"
+    if code >= 500:
+        return f"MyDramaList returned an error (HTTP {code})", "try again later"
+    return f"{msg} (HTTP {code})", None
+
+
+def _print_error(message: str, hint: str | None = None) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    if hint:
+        print(f"hint:  {hint}", file=sys.stderr)
+
+
+# -- logging ----------------------------------------------------------------
+class _StderrHandler(logging.StreamHandler):
+    """Writes to the *current* sys.stderr (survives stream swaps in tests)."""
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value) -> None:
+        pass
+
+
+class _CLIFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        msg = record.getMessage()
+        if record.levelno >= logging.WARNING:
+            return f"warning: {msg}"
+        return f"  · {msg}"
+
+
+def _setup_cli_logging(verbosity: int) -> None:
+    h = _StderrHandler()
+    h.setFormatter(_CLIFormatter())
+    log.handlers[:] = [h]
+    log.setLevel(logging.WARNING if verbosity <= 0 else
+                 logging.INFO if verbosity == 1 else logging.DEBUG)
+    log.propagate = False
+
+
+class _Spinner:
+    """'Contacting MyDramaList…' on stderr when a call takes a moment. Only on
+    an interactive terminal and when -v isn't printing its own progress."""
+
+    def __init__(self, enabled: bool, text: str = "Contacting MyDramaList") -> None:
+        self.enabled, self.text = enabled, text
+        self._task: asyncio.Task | None = None
+        self._shown = False
+
+    async def _run(self) -> None:
+        await asyncio.sleep(0.6)
+        utf = (getattr(sys.stderr, "encoding", "") or "").lower().replace("-", "") == "utf8"
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if utf else "|/-\\"
+        i = 0
+        while True:
+            self._shown = True
+            sys.stderr.write(f"\r{frames[i % len(frames)]} {self.text}…")
+            sys.stderr.flush()
+            i += 1
+            await asyncio.sleep(0.1)
+
+    async def __aenter__(self) -> "_Spinner":
+        if self.enabled:
+            self._task = asyncio.ensure_future(self._run())
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            if self._shown:
+                sys.stderr.write("\r" + " " * (_dw(self.text) + 4) + "\r")
+                sys.stderr.flush()
+
+
+# -- commands ---------------------------------------------------------------
+async def _call(args) -> object:
+    mdl = MDL()
+    try:
+        c = args.command
+        if c == "genres":
+            return await mdl.genres()
+        if c == "languages":
+            return await mdl.languages()
+        if c == "calendar":
+            return await mdl.calendar()
+        if c == "search":
+            return await mdl.search(" ".join(args.query), country=args.country,
+                                    type=args.type, year=args.year, page=args.page)
+        if c == "search-people":
+            return await mdl.search_people(" ".join(args.query), page=args.page)
+        if c == "title":
+            return await mdl.title(args.id)
+        if c == "people":
+            return await mdl.people(args.id)
+        if c == "watchlist":
+            return await mdl.watchlist(args.status)
+        if c == "me":
+            return await mdl.me()
+        if c == "leaderboard":
+            return await mdl.leaderboard(args.period)
+        raise _CLIError(f"unknown command: {c}", "see `mdlaw --help`", code=2)
+    finally:
+        await mdl.close()
+
+
+def _want_json(args) -> bool:
+    if args.output == "json":
+        return True
+    if args.output == "text":
+        return False
+    return not sys.stdout.isatty()
+
+
+def _emit(data: object, args) -> None:
+    if _want_json(args):
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+    render = _RENDERERS.get(args.command, _render_generic)
+    print("\n".join(render(data, args)))
+
+
+def _run_cli(argv: list[str]) -> int:
+    """Parse arguments, run one command, print the result. Returns the exit code."""
+    global TRANSPORT
+    _ensure_utf8_stdio()
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:  # argparse: --help/--version (0) or bad usage (2)
+        return e.code if isinstance(e.code, int) else 2
+    if args.command is None:
+        parser.print_help()
+        return 0
+    args.limit = getattr(args, "limit", None)
+    if getattr(args, "transport", None):
+        TRANSPORT = args.transport
+        os.environ["MDL_TRANSPORT"] = args.transport  # serve re-imports the module
+    if args.command in ("serve", "run"):
+        # The server sets up its own log format (MDL_LOG_LEVEL, default INFO);
+        # -v here means DEBUG.
+        if args.verbose:
+            os.environ["MDL_LOG_LEVEL"] = "DEBUG"
+        extra = [x for k in ("host", "port") if getattr(args, k)
+                 for x in (f"--{k}", getattr(args, k))]
+        return _serve(extra)
+    _setup_cli_logging(args.verbose)
+    try:
+        if args.command == "self":
+            return self_check()
+        if args.command == "auth":
+            if args.username == "status" and not args.password:
+                return _cli_auth_status(args)
+            return _cli_auth(args)
+        if args.command == "logout":
+            return _cli_logout()
+        if not auth_enabled():
+            _load_auth()
+        spin = sys.stderr.isatty() and args.verbose == 0 and not _want_json(args)
+
+        async def run() -> object:
+            async with _Spinner(spin):
+                return await _call(args)
+        _emit(asyncio.run(run()), args)
+        return 0
     except HTTPException as e:
-        print(f"error: {e.detail}", file=sys.stderr)
+        _print_error(*_explain(e))
         return 1
-    print(_json.dumps(data, indent=2, ensure_ascii=False))
-    return 0
-
-
-def _cli_auth(rest: list[str]) -> int:
-    """mdlaw auth [username] [password] — log in and save the session.
-
-    One-liner: `mdlaw auth user pass` (no prompts), or fall back to env vars
-    MDL_USERNAME/MDL_PASSWORD, or prompt interactively when both are missing.
-    """
-    import getpass
-    import sys
-
-    if rest and rest[0] == "status":
-        return _cli_auth_status()
-
-    username = rest[0] if rest else None
-    password = rest[1] if len(rest) > 1 else None
-    if not username:
-        username = os.environ.get("MDL_USERNAME", "").strip() or None
-    if not password:
-        password = os.environ.get("MDL_PASSWORD", "").strip() or None
-    if not username:
-        username = input("MDL username/email: ").strip()
-    if not username:
-        print("error: username required", file=sys.stderr)
+    except _CLIError as e:
+        _print_error(e.message, e.hint)
+        return e.code
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except Exception as e:  # unexpected: short message, traceback only with -vv
+        if args.verbose >= 2:
+            import traceback
+            traceback.print_exc()
+        _print_error(f"unexpected {type(e).__name__}: {e}",
+                     "run again with -vv for the full traceback")
         return 1
-    if not password:
-        password = getpass.getpass("MDL password: ")
 
+
+def _cli_auth(args) -> int:
+    """mdlaw auth [username] [password] — log in and save the session."""
     global MDL_USERNAME, MDL_PASSWORD, _PERSIST_AUTH
-    MDL_USERNAME = username
-    MDL_PASSWORD = password
-    _PERSIST_AUTH = True
+    username = args.username or os.environ.get("MDL_USERNAME", "").strip() or None
+    password = args.password
+    if args.password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+    password = password or os.environ.get("MDL_PASSWORD", "").strip() or None
+    interactive = sys.stdin.isatty()
+    if not username:
+        if not interactive:
+            raise _CLIError("no username given", "usage: mdlaw auth <username>", code=2)
+        username = input("MDL username or email: ").strip()
+    if not username:
+        raise _CLIError("a username is required", code=2)
+    if not password:
+        if not interactive:
+            raise _CLIError("no password given",
+                            "pipe it with --password-stdin or set MDL_PASSWORD", code=2)
+        import getpass
+        password = getpass.getpass("Password: ")
+    MDL_USERNAME, MDL_PASSWORD, _PERSIST_AUTH = username, password, True
 
-    async def do_login():
+    async def do_login() -> None:
         try:
-            await login(force=True)
-            return True
-        except HTTPException as e:
-            print(f"error: {e.detail}", file=sys.stderr)
-            return False
+            async with _Spinner(sys.stderr.isatty() and args.verbose == 0, "Logging in"):
+                await login(force=True)
         finally:
             await close_client()
-
-    if not asyncio.run(do_login()):
-        return 1
-    print(f"logged in as {username}; session saved to {_AUTH_FILE}")
+    asyncio.run(do_login())
+    left = _fmt_duration(_auth["expires_at"] - time.time())
+    if _want_json(args):
+        print(json.dumps(_session_info(), indent=2, ensure_ascii=False))
+    else:
+        print(f"Logged in as {username}.")
+        print(f"Session saved to {_AUTH_FILE} (token valid for {left}, refreshed automatically).")
     return 0
 
 
-def _cli_auth_status() -> int:
-    """Show saved session info."""
-    if not _load_auth() or not _auth["token"]:
-        print("not logged in (run `mdlaw auth`)")
-        return 0
+def _session_info() -> dict:
+    """Saved-session summary for `auth status` — never includes tokens."""
     user = _auth["user"] if isinstance(_auth["user"], dict) else {}
-    name = (user.get("name") or user.get("username")
-            or _auth.get("username") or "")
-    remaining = max(0, int(_auth["expires_at"] - time.time()))
-    print(f"logged in as: {name}")
-    print(f"token expires in: {remaining // 3600}h {remaining % 3600 // 60}m")
-    print(f"device_id: {_auth['device_id']}")
-    print(f"session file: {_AUTH_FILE}")
+    now = time.time()
+    return {
+        "logged_in": bool(_auth["token"] or _auth["refresh_token"]),
+        "account": user.get("name") or user.get("username") or _auth.get("username") or None,
+        "expires_at": _auth["expires_at"] or None,
+        "expired": bool(_auth["token"]) and _auth["expires_at"] <= now,
+        "can_refresh": bool(_auth["refresh_token"]),
+        "session_file": _AUTH_FILE,
+        "env_credentials": bool(os.environ.get("MDL_USERNAME") and os.environ.get("MDL_PASSWORD")),
+    }
+
+
+def _cli_auth_status(args) -> int:
+    """Show the saved session: account, token state, what happens next."""
+    _load_auth()
+    info = _session_info()
+    if _want_json(args):
+        print(json.dumps(info, indent=2, ensure_ascii=False))
+        return 0
+    env = "MDL_USERNAME / MDL_PASSWORD are set (used when the session can't be refreshed)" \
+        if info["env_credentials"] else None
+    if not info["logged_in"]:
+        print("Not logged in.")
+        if env:
+            print(env)
+        print("Log in with: mdlaw auth <username>")
+        return 0
+    left = _auth["expires_at"] - time.time()
+    if not info["expired"]:
+        token = f"valid for {_fmt_duration(left)}"
+    elif info["can_refresh"]:
+        token = f"expired {_fmt_duration(left)} ago — the next request will try to refresh it"
+    else:
+        token = f"expired {_fmt_duration(left)} ago — log in again with `mdlaw auth`"
+    print("\n".join(_card("Saved session", [
+        ("Account", info["account"] or "(unknown — log in again to record it)"),
+        ("Token", token),
+        ("Device id", _auth["device_id"]),
+        ("File", info["session_file"]),
+        ("Env", env),
+    ])))
     return 0
 
 
@@ -1619,9 +2339,11 @@ def _cli_logout() -> int:
     """Remove the saved session."""
     try:
         os.remove(_AUTH_FILE)
-        print("logged out; session file removed")
-    except OSError:
-        print("no saved session")
+        print(f"Logged out (removed {_AUTH_FILE}).")
+    except FileNotFoundError:
+        print("Not logged in — no saved session to remove.")
+    except OSError as e:
+        raise _CLIError(f"could not remove {_AUTH_FILE}: {e}") from None
     return 0
 
 
@@ -1667,12 +2389,9 @@ def _serve(args: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point (console script `mdlaw`)."""
+    """CLI entry point (console script `mdlaw`). No command → start the server
+    (as do bare --host/--port, kept for compatibility)."""
     args = argv if argv is not None else sys.argv[1:]
-    if args and args[0] == "self":
-        return self_check()
-    if args and args[0] in ("serve", "run"):
-        return _serve(args[1:])
     if not args or args[0].partition("=")[0] in ("--host", "--port"):
         return _serve(args)
     return _run_cli(args)

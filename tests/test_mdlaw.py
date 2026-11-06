@@ -337,12 +337,11 @@ def test_auth_status_shows_username(tmp_path, monkeypatch, capsys):
         "expires_at": time.time() + 3600, "user": None, "username": "nasa@x.com",
     }))
     monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
-    mdlaw._load_auth()
-    assert mdlaw._cli_auth_status() == 0
+    assert mdlaw.main(["auth", "status", "-o", "text"]) == 0
     out = capsys.readouterr().out
-    assert "logged in as: nasa@x.com" in out
-    assert "token expires in:" in out
-    assert "0h 59m" in out or "1h 0m" in out
+    assert "nasa@x.com" in out
+    assert "valid for 59m" in out or "valid for 1h" in out
+    assert "\"t\"" not in out  # never print the token
 
 
 def test_openapi_version_matches_package():
