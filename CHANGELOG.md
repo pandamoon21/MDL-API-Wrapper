@@ -105,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 59 new offline tests (including `tests/test_cli.py`). A `conftest.py` fixture keeps tests away
   from the real `~/.mdlaw_auth.json`.
 - `pyproject.toml`: `dev` extra (`pip install -e .[dev]`), project URLs, and
-  ruff config.
+  a ruff config with an explicit rule set. CI pins the ruff version, so lint
+  results don't change when ruff widens its defaults.
 
 ## [1.6.2] - 2026-09-02
 
