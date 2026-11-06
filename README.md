@@ -139,6 +139,13 @@ MDL_USERNAME=you@example.com MDL_PASSWORD=hunter2 mdlaw search "crash landing"
 The CLI defaults to the `curl_cffi` transport (passes Cloudflare from flagged
 IPs); override with `--transport httpx` if you prefer.
 
+Start the server with a custom bind address (defaults: `HOST`/`PORT` env vars,
+else `0.0.0.0:8000`):
+
+```bash
+mdlaw serve --host 127.0.0.1 --port 9000
+```
+
 Errors print a clean `error: ...` message to stderr with exit code 1 — no
 tracebacks.
 
@@ -375,8 +382,8 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/status` | — *(alias dashboard)* | — | — |
 | GET | `/api/v1/auth/status` | — *(local)* | — | — |
 | GET | `/api/v1/cache/stats` | — *(local)* | — | — |
-| POST | `/api/v1/auth/login` | `POST /auth/login` *(force re-login)* | — | env |
-| POST | `/api/v1/auth/refresh` | `POST /auth/refresh` *(force refresh)* | — | env |
+| POST | `/api/v1/auth/login` | `POST /auth/login` *(force re-login; returns status, never tokens)* | — | `X-Admin-Token` |
+| POST | `/api/v1/auth/refresh` | `POST /auth/refresh` *(force refresh; returns status, never tokens)* | — | `X-Admin-Token` |
 | GET | `/api/v1/genres` | `GET /genres` | 1h | — |
 | GET | `/api/v1/languages` | `GET /languages/supported?v=2` | 1h | — |
 | GET | `/api/v1/titles/{id}` | `GET /titles/{id}?expand=1` | 5m | ✅ |
@@ -578,6 +585,9 @@ Everything `mdlaw` needs is set via environment variables. Here's the full pictu
 | `MDL_PASSWORD` | No | Password for the account above (paired with `MDL_USERNAME`) | disabled |
 | `MDL_CACHE_BACKEND` | No | `memory` · `sqlite` · `mysql` · `postgres` | `memory` |
 | `MDL_CACHE_DB_URL` | Only if backend ≠ memory | DSN, e.g. `sqlite:///mdlaw_cache.db` | — |
+| `MDL_ADMIN_TOKEN` | No | Enables `POST /api/v1/auth/{login,refresh}` (send as `X-Admin-Token`); unset → those routes 404 | disabled |
+| `MDL_RATE_LIMIT` | No | Max requests/minute per client IP on `/api/v1/*` (health exempt); `0` = off | `0` |
+| `MDL_TRUST_PROXY` | No | `1` → client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind your own proxy) | off |
 
 ### 🔐 API key (optional)
 
@@ -653,6 +663,18 @@ curl http://localhost:8000/api/v1/auth/status
 
 > ⚠️ **2FA is not supported.** If your account has 2FA enabled, either disable it or use an app password. The wrapper will return `428` ("2FA required") instead of hanging.
 
+Force a re-login / refresh (only when `MDL_ADMIN_TOKEN` is set — otherwise these
+routes return `404`). They return the same status object as above; the access
+and refresh tokens are never sent to HTTP clients:
+
+```bash
+curl -X POST -H "X-Admin-Token: $MDL_ADMIN_TOKEN" http://localhost:8000/api/v1/auth/login
+```
+
+> 🔒 **Public instances:** auth-gated routes (`/me`, `/watchlist`, …) act as the
+> configured account for every caller. Only expose an instance with
+> credentials to people you trust, and consider `MDL_RATE_LIMIT`.
+
 ---
 
 ## 🚢 Deploy
@@ -667,6 +689,8 @@ required env var.
 | `MDL_TRANSPORT` | optional (`curl_cffi` default, `httpx` to opt out) |
 | `MDL_USERNAME` + `MDL_PASSWORD` | optional (auth-gated endpoints) |
 | `MDL_CACHE_BACKEND` + `MDL_CACHE_DB_URL` | optional (persistent cache) |
+| `MDL_ADMIN_TOKEN` | optional (enables the force-login/refresh routes) |
+| `MDL_RATE_LIMIT` (+ `MDL_TRUST_PROXY=1` on Fly) | optional (per-IP inbound limit for public instances) |
 
 ### Option A — Fly.io (recommended)
 
@@ -808,7 +832,7 @@ Covers: key decode, md5 formula, header scheme, TTL cache expiry, SQL cache chan
 
 ```
 mdlaw/
-├── mdlaw.py            # the whole API: config, client, cache (memory/SQL), auth, 27 routes
+├── mdlaw.py            # the whole API: config, client, cache (memory/SQL), auth, routes
 ├── pyproject.toml      # PyPI packaging (pip install mdlaw → console script)
 ├── LICENSE             # MIT
 ├── AGENTS.md           # AI-agent / dev instructions (install, verify, extend, pitfalls)
@@ -822,7 +846,12 @@ mdlaw/
 ├── pytest.ini          # pythonpath for tests
 ├── .env.example        # API key + account + cache backend placeholders
 ├── tests/
-│   └── test_mdlaw.py   # 14 offline checks
+│   ├── conftest.py     # isolation fixture (no real session file, fresh state)
+│   ├── test_mdlaw.py   # core offline checks
+│   └── test_hardening.py  # auth / error-handling / cache regression tests
+├── .github/workflows/
+│   ├── docker.yml      # GHCR image on version tags
+│   └── ci.yml          # ruff + pytest (manual trigger only)
 └── README.md
 ```
 

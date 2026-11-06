@@ -223,7 +223,7 @@ def test_mdl_new_endpoints(monkeypatch):
 def test_mdl_constructor_auth(monkeypatch):
     # MDL(username=..., password=...) sets the module-level credentials used by
     # login()/auth_headers(). Verify without network.
-    mdl = mdlaw.MDL(username="user@example.com", password="s3cret")
+    mdlaw.MDL(username="user@example.com", password="s3cret")
     assert mdlaw.MDL_USERNAME == "user@example.com"
     assert mdlaw.MDL_PASSWORD == "s3cret"
     assert mdlaw.auth_enabled() is True
@@ -238,6 +238,7 @@ def test_saved_session_roundtrip(monkeypatch, tmp_path):
     # via tmp_path + monkeypatch.
     auth_file = tmp_path / ".mdlaw_auth.json"
     monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(mdlaw, "_PERSIST_AUTH", True)  # as `mdlaw auth` does
 
     mdlaw._auth.update({
         "token": "tok123",
@@ -258,7 +259,9 @@ def test_saved_session_roundtrip(monkeypatch, tmp_path):
     assert mdlaw._load_auth() is True
     assert mdlaw._auth["token"] == "tok123"
     assert mdlaw._auth["refresh_token"] == "ref456"
-    assert mdlaw.auth_enabled() is True  # dummy creds → auth enabled
+    assert mdlaw.auth_enabled() is True  # saved session → auth enabled
+    # no fake credentials are injected any more
+    assert mdlaw.MDL_USERNAME == "" and mdlaw.MDL_PASSWORD == ""
 
     # MDL() constructor auto-loads the saved session too
     mdlaw._auth.update({"token": None, "refresh_token": None,
@@ -266,7 +269,7 @@ def test_saved_session_roundtrip(monkeypatch, tmp_path):
                         "user": None})
     monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
     monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
-    mdl = mdlaw.MDL()
+    mdlaw.MDL()
     assert mdlaw._auth["token"] == "tok123"
 
 

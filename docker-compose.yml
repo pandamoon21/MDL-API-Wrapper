@@ -16,6 +16,9 @@ services:
       MDL_PASSWORD: ${MDL_PASSWORD:-}
       MDL_CACHE_BACKEND: ${MDL_CACHE_BACKEND:-memory}
       MDL_CACHE_DB_URL: ${MDL_CACHE_DB_URL:-}
+      MDL_ADMIN_TOKEN: ${MDL_ADMIN_TOKEN:-}
+      MDL_RATE_LIMIT: ${MDL_RATE_LIMIT:-0}
+      MDL_TRUST_PROXY: ${MDL_TRUST_PROXY:-}
     volumes:
       - mdlaw_data:/data
     restart: unless-stopped

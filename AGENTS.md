@@ -39,14 +39,15 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 21 passed
+python3 -m pytest tests/ -q      # expect: 47 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/test_mdlaw.py # 21 offline checks (no network)
+tests/              # 47 offline checks (no network); conftest.py isolates state
+.github/workflows/  # docker.yml (GHCR on tags), ci.yml (ruff + pytest, manual only)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
 Dockerfile          # python:3.12-slim, non-root
@@ -65,6 +66,9 @@ pytest.ini          # pythonpath = .
 | `MDL_USERNAME` + `MDL_PASSWORD` | Enable auth-gated endpoints (title detail, search, watchlist, /me) | no | disabled |
 | `MDL_CACHE_BACKEND` | `memory` \| `sqlite` \| `mysql` \| `postgres` | no | `memory` |
 | `MDL_CACHE_DB_URL` | DSN for SQL backends, e.g. `sqlite:///mdlaw_cache.db` | only if backend ≠ memory | — |
+| `MDL_ADMIN_TOKEN` | Enables `POST /api/v1/auth/{login,refresh}` via `X-Admin-Token` | no | routes 404 |
+| `MDL_RATE_LIMIT` | Requests/minute per client IP on `/api/v1/*` (health exempt) | no | `0` (off) |
+| `MDL_TRUST_PROXY` | `1` → client IP from `Fly-Client-IP`/`X-Forwarded-For` | no | off |
 
 Copy `.env.example` to `.env` and fill in values; `mdlaw` reads env vars at
 import time (no dotenv loader — set them in the shell or a process manager).
@@ -119,8 +123,18 @@ import time (no dotenv loader — set them in the shell or a process manager).
   optional.
 - **Auth-gated endpoints** need `auth=True` in the `fetch()` call; without
   credentials they return a clear 400 (handled centrally in `fetch`).
+- **Upstream calls go through `_send()` + `_parse()`** — they map both httpx
+  and curl_cffi failures to 502/504 and upstream statuses to HTTPException.
+  Don't call `get_client().request()` directly.
+- **Query strings**: build them with `_qs(path, **params)` so user input is
+  URL-encoded (and the cache key can't be split).
+- **`_auth_lock` is not reentrant**: code that already holds it calls
+  `_login_locked()`, never `login()`.
+- **Never return `_auth` from a route** — it holds the access/refresh tokens.
 - **CLI session**: `mdlaw auth` saves to `~/.mdlaw_auth.json` (chmod 600);
-  `MDL()` and later CLI calls auto-load it. Don't commit that file.
+  `MDL()` and later CLI calls auto-load it. Only the CLI (or a process that
+  loaded that file) writes it — the server never puts tokens on disk.
+  Don't commit that file. Tests isolate it via `tests/conftest.py`.
 
 ## Deploy
 

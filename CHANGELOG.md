@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-06
+
+### Security
+
+- `POST /api/v1/auth/login` and `/auth/refresh` returned the internal auth
+  state — including the account's access and refresh tokens — to any caller.
+  They now require `MDL_ADMIN_TOKEN` (sent as `X-Admin-Token`; unset → `404`)
+  and return the same status object as `GET /auth/status`, never tokens.
+- Login failure messages no longer echo the raw upstream response.
+
+### Fixed
+
+- Deadlock: `refresh()` held the auth lock and called `login()`, which tried
+  to take the same (non-reentrant) lock. Any refresh without a refresh token,
+  or a failed refresh, hung every authenticated request.
+- Upstream errors with the default `curl_cffi` transport escaped as bare
+  `500`s: only httpx exceptions were handled. Timeouts are now `504`,
+  transport errors `502`, upstream statuses are passed through, and the
+  Cloudflare-challenge hint is shown again.
+- Auth calls ignored the upstream HTTP status and crashed on non-JSON bodies.
+  A `200` with a non-JSON body is now a `502` instead of a `500`.
+- Search/tag/people queries are URL-encoded (`q="a&b"` or `#` no longer
+  breaks the request or the cache key).
+- A saved CLI session no longer injects fake `"saved"` credentials. When it
+  can't be refreshed you get a clear `401` asking you to run `mdlaw auth`.
+- The server and library no longer write `~/.mdlaw_auth.json` (it failed on
+  read-only filesystems such as Vercel). Only `mdlaw auth`, or a process that
+  loaded that file, writes it. A failed write now only warns.
+- A refresh response without a `refresh_token`/`user` keeps the previous
+  values instead of clearing them.
+- MySQL cache backend: schema creation used `Connection.execute` (not in
+  pymysql), the reserved word `key` was unquoted, and `TEXT PRIMARY KEY` is
+  invalid there. Now: cursor-based schema, quoted `` `key` `` and
+  `VARCHAR(768)`. Covered by an offline SQL-capture test; not yet run
+  against a live MySQL server.
+- `mdlaw serve --port 9000` was parsed as an unknown command. `serve` now
+  accepts `--host`/`--port` and honours `HOST`/`PORT`.
+
+### Changed
+
+- SQL cache operations run in a worker thread, so a remote DB no longer
+  blocks the event loop.
+- Concurrent cache misses for the same key share one upstream request, and a
+  burst of `401`s triggers a single token refresh.
+- `/cache/stats` and `/dashboard` share one stats implementation; the response
+  shape is unchanged.
+- The CLI help no longer says the server defaults to `httpx`.
+
+### Added
+
+- Optional per-IP inbound rate limit: `MDL_RATE_LIMIT` (requests/minute), and
+  `MDL_TRUST_PROXY=1` to read the client IP behind Fly or another proxy.
+- `.github/workflows/ci.yml` runs ruff and pytest on Python 3.10–3.13. It is
+  manual only (`workflow_dispatch`) and never triggers on its own.
+- 26 new offline regression tests. A `conftest.py` fixture keeps tests away
+  from the real `~/.mdlaw_auth.json`.
+
 ## [1.6.2] - 2026-09-02
 
 ### Fixed
