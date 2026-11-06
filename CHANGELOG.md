@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-06
+
+### Added
+
+- Server-side catalog browse. `POST /search/titles` accepts filters when called
+  without `q`: `types`, `genres`, `countries`, `releases` (from year) and
+  `sort` (`top`|`popular`). These were recovered from the app's strings and
+  verified live.
+  - `MDL.browse()`, `GET /api/v1/browse` and `mdlaw browse`.
+  - Types and countries take names or ids; genres take names, slugs or ids.
+    Each filter accepts several values.
+- New endpoints, found by mining the app's strings and probing live (read-only):
+  - Public: `GET /api/v1/lists/trending`, `/lists/recent`, `/reviews/{id}`,
+    `/articles/{id}`.
+  - Account: `GET /api/v1/people/popular`, `POST /api/v1/search/users`,
+    `GET /api/v1/users/{id|username}/lists`, `/users/{id|username}/friends`.
+  - Each has a matching `MDL` method.
+- CLI: `mdlaw lists [trending|recent|popular|featured]`.
+- Endpoints found in the website's JavaScript (`mydramalist.com/v1`) that also
+  work on the mobile API. All are public and fetched without a token:
+  - `GET /api/v1/recommendations`: community "if you liked X, watch Y" picks,
+    each with a reason.
+  - `/titles/{id}/feed` and `/people/{id}/feed`.
+  - `/people/{id}/gifts`: top and recent flower givers.
+  - `/articles/categories`.
+  - `/groups` and `/groups/{id}`.
+  - Each has a matching `MDL` method. The CLI adds `mdlaw recommendations`
+    (alias `recs`).
+
+### Changed
+
+- `MDL.browse_by_genre()` uses the server-side genre filter by default: one
+  request instead of one title-detail call per candidate, and it returns search
+  items. `source="trending"`/`"top_movies"` keep the old detail-based
+  behaviour.
+- CLI `title` card shows the fields the API actually returns: rank,
+  popularity, aired range, episodes × runtime, alternative titles, tags,
+  watchers and certification. `99999` (not ranked) is hidden.
+- CLI `watchlist` shows status (mapped from `list_id`, verified per list), an
+  episode progress like `5/7` and the user's score. It defaults to 50 rows.
+- CLI `me` card adds contributions and roles.
+
+### Fixed
+
+- Docs said there was no server-side browse/filter. There is, as above.
+- Docs and help said `mdlaw watchlist` without a status shows the full list.
+  It shows only what you're currently watching (`/sync/mylist/watchlist`).
+
 ## [1.7.0] - 2026-11-06
 
 ### Security

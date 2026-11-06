@@ -64,9 +64,12 @@ path to a working setup.
 
 ```bash
 pip install mdlaw
-mdlaw                                # serves http://0.0.0.0:8000 (Swagger at /docs)
+mdlaw genres                         # a table on a terminal, JSON when piped
+mdlaw people 14352                   # actor profile — no account needed
+mdlaw auth                           # log in once (for search, browse, title, lists…)
+mdlaw browse --type drama --country korea --sort popular
+mdlaw serve                          # HTTP API on http://0.0.0.0:8000 (Swagger at /docs)
 mdlaw self                           # offline self-check
-mdlaw genres                         # one-shot JSON data commands (see below)
 ```
 
 > `mdl-api-key` is **not a secret** — it's a client nonce the MDL app generates
@@ -78,7 +81,7 @@ mdlaw genres                         # one-shot JSON data commands (see below)
 
 ```bash
 # 1. Clone & enter
-git clone <your-repo-url> mdlaw && cd mdlaw
+git clone https://github.com/pandamoon21/MDL-API-Wrapper mdlaw && cd mdlaw
 
 # 2. Create venv & install
 python3 -m venv .venv && . .venv/bin/activate
@@ -92,9 +95,12 @@ Verify:
 
 ```bash
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","service":"mdlaw"}
+# {"status":"ok","service":"mdlaw","auth":false}
 
 curl http://localhost:8000/api/v1/genres | python3 -m json.tool
+
+# with MDL_USERNAME/MDL_PASSWORD set:
+curl "http://localhost:8000/api/v1/browse?type=drama&genre=romance&country=south-korea&sort=popular"
 ```
 
 Interactive docs (Swagger UI): **http://localhost:8000/docs**
@@ -115,10 +121,15 @@ mdlaw languages                    # supported languages
 mdlaw calendar --days 3            # what airs in the next 3 days, grouped by day
 mdlaw people 14352                 # actor / crew profile
 mdlaw leaderboard weekly -n 10     # top 10 actors this week
+mdlaw lists                        # trending user lists (also: recent, popular, featured)
+mdlaw recs                         # community picks: "liked X → try Y", with the reason
+mdlaw browse --type drama --genre romance --country korea --sort popular
+                                   # * server-side catalog browse (--from YEAR, --page N)
 mdlaw search "crash landing"       # * search titles (--page, --country, --type, --year)
 mdlaw search-people "lee min ho"   # * search actors and crew
-mdlaw title 686                    # * title detail
-mdlaw watchlist completed          # * your list (completed|dropped|onhold|plantowatch|…)
+mdlaw title 35729                  # * title detail (Crash Landing on You)
+mdlaw watchlist                    # * what you're currently watching
+mdlaw watchlist completed          # * another list: completed|plantowatch|onhold|dropped|notinterested
 mdlaw me                           # * your profile
 ```
 
@@ -206,13 +217,20 @@ from mdlaw import MDL
 async def main():
     mdl = MDL()                      # optional: MDL(transport="curl_cffi")
 
-    genres = await mdl.genres()      # list of genres
-    title = await mdl.title(686)     # title detail (requires account credentials)
-    results = await mdl.search("crash landing")   # search titles
-    watch = await mdl.watchlist("completed")      # your watchlist (requires credentials)
-    me = await mdl.me()              # your profile (requires credentials)
+    genres = await mdl.genres()      # list of genres (public)
+    person = await mdl.people(14352) # actor profile (public)
+    lists = await mdl.lists_trending(limit=5)       # trending user lists (public)
 
-    print(mdl.stats())               # {'backend': 'TTLCache', 'hits': ..., ...}
+    # the rest need an account (see "Authenticating as a package")
+    title = await mdl.title(35729)   # title detail
+    results = await mdl.search("crash landing")    # search titles
+    korean_romance = await mdl.browse(types="drama", genres="romance",
+                                      countries="south-korea", sort="popular")
+    watching = await mdl.watchlist()                # what you're watching now
+    done = await mdl.watchlist("completed")         # another list
+    me = await mdl.me()              # your profile
+
+    print(mdl.stats())               # {'backend': 'memory', 'hits': ..., ...}
     await mdl.close()                # close the HTTP session
 
 asyncio.run(main())
@@ -253,104 +271,79 @@ me = await mdl.me()     # uses the saved token, auto-refreshes when expired
 > accounts are not supported (428).
 
 Every `MDL` method maps to a route: `genres()`, `languages()`, `calendar()`,
-`articles_featured()`, `lists_featured()`, `lists_popular()`, `leaderboard()`,
-`people()`, `payment_plans()`, `payment_coins()`, `title()`,
-`title_reviews()`, `title_recommendations()`, `title_comments()`,
-`title_credits()`, `search()`, `search_people()`, `watchlist()`, `me()`.
+`articles_featured()`, `article()`, `articles_categories()`,
+`recommendations()`, `title_feed()`, `people_feed()`, `people_gifts()`,
+`groups()`, `group()`, `lists_featured()`, `lists_popular()`,
+`lists_trending()`, `lists_recent()`, `leaderboard()`, `people()`,
+`people_credits()`, `people_popular()`, `user()`, `user_stats()`,
+`user_lists()`, `user_friends()`, `review()`, `payment_plans()`,
+`payment_coins()`, `title()`, `title_reviews()`, `title_recommendations()`,
+`title_comments()`, `title_credits()`, `titles_trending()` and the other title
+feeds, `search()`, `browse()`, `search_people()`, `search_users()`,
+`search_tags()`, `watchlist()`, `me()`.
 
 Prefer `await mdl.get(path, ttl=..., auth=...)` / `post(...)` for ad-hoc calls
 to endpoints that aren't wrapped yet. Account endpoints require
 `MDL_USERNAME` + `MDL_PASSWORD` env vars, exactly like the HTTP server.
 
-## 🎯 Genres & languages — reference data (not filters)
+## 🎯 Browse & filter — server-side
 
-`genres()` and `languages()` are **reference lists**, not query filters. They
-return every genre / language MyDramaList knows, which is useful for building
-dropdowns, badges, or localized UI. They are **not** accepted as parameters by
-`search()` or `title()` — the upstream API ignores them (verified live, see
-below).
+The app's catalog browser is the search endpoint called **without `q`**:
+`POST /search/titles?edge=1&page=N` with filter params. (Recovered from the
+app's strings and verified live 2026-11-06; earlier versions of these docs said
+no server-side filter existed — that was wrong.)
 
-**`await mdl.genres()`** → list of 35 genres:
+| Filter | Param | Values |
+|---|---|---|
+| Type | `types` | `drama` (68), `movie` (77), `tv-show` (86) |
+| Genre | `genres` | any genre name/slug/id from `genres()` |
+| Country | `countries` | `japan` (1), `china` (2), `south-korea` (3), `hong-kong` (4), `taiwan` (5), `thailand` (6) |
+| Released from | `releases` | year — that year or later |
+| Sort | `sort` | `top` (highest rated, default) or `popular` (most watched) |
 
-```python
-[
-  {"id": 1, "name": "Action", "slug": "action"},
-  {"id": 5, "name": "Adventure", "slug": "adventure"},
-  {"id": 13, "name": "Business", "slug": "business"},
-  # ... 35 total
-]
-```
-
-**`await mdl.languages()`** → dict with `languages[]` (39 supported):
+Every filter takes several values (comma-joined upstream). 20 results per page;
+requires an account.
 
 ```python
-{
-  "country": "ID",
-  "default_language": {"mobile": "en-US", "web": "en-US"},
-  "language": "id",
-  "languages": [
-    {"id": 462, "code": "ar", "iso_code": "SA", "name": "Arabic",
-     "native_name": "Arabic", "i18n": false, "i18n_web": false},
-    # ... 39 total
-  ]
-}
+await mdl.browse(types="drama", genres="romance", countries="south-korea", sort="popular")
+await mdl.browse(types=["drama", "movie"], countries=["japan", "thailand"], released_from=2023)
+await mdl.browse(genres=[14, "thriller"], types="movie", page=2)
 ```
-
-### Can I filter `search()` / `title()` by genre or language?
-
-**Server-side: no.** The upstream API has no browse/discover/filter endpoint —
-every candidate path (`/titles/browse`, `/discover`, `/titles/filter`, …) is
-404/405, and `GET /titles/{id}?genre_id=1` / `?genre=1` / `?language_id=462`
-silently ignores the params. `mdlaw` filters client-side instead (below).
-
-### Search works — correct endpoint
-
-`search()` (and the `/api/v1/search` route) hits **`POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1`** — `q` and `page` are **URL query params**, not a JSON body. Verified live:
 
 ```bash
-mdlaw search "crash landing on you"
-# → "Crash Landing on You" (2019), "Crash Landing on You Special...", ...
+mdlaw browse --type drama --genre romance --country korea --sort popular
+curl "localhost:8000/api/v1/browse?type=movie&genre=horror&genre=thriller&from=2020"
 ```
 
-Earlier builds posted `{"q": ...}` to `/search`, which the server ignored
-(returning a default feed) — fixed in 1.5.1.
+Not mapped yet: the app also sends `status`, `ratings`, `start` and `tags`
+filters, but the values tried had no visible effect, so they are not exposed.
 
-### Client-side filtering — `search()` post-filters + `browse_by_genre()`
+`browse_by_genre(genre_id)` now uses the server-side genre filter (one request,
+returns search items). `source="trending"` / `"top_movies"` keep the old
+behaviour — one title-detail call per candidate, returning details.
 
-Search results carry `country`, `language`, `type`, `media_type`, and `year`
-(but **no `genres` field**), so `search()` post-filters on those:
+### Search
+
+`search(q)` (and `POST /api/v1/search`) hits **`POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1`**
+— `q` and `page` are URL query params, not a JSON body. It also post-filters
+results client-side on the fields search items carry:
 
 ```python
-await mdl.search(country="South Korea")                 # only Korean results
-await mdl.search(type="Drama", year=2024)               # Dramas from 2024
-await mdl.search(language="Chinese", media_type="Movie")  # Chinese movies
-await mdl.search(limit=5)                               # cap at 5 items
+await mdl.search("love", country="South Korea", type="Drama", year=2024, limit=5)
 ```
 
-`q` is kept for API compatibility but does nothing upstream.
+### Genres & languages — reference lists
 
-Genre isn't filterable from search results, so `browse_by_genre()` fetches each
-candidate's detail (the only place `genres[]` appears) and keeps those matching:
+`genres()` (35 genres: `{id, name, slug}`) feeds the `genres` browse filter.
+`languages()` (39 UI languages) is a reference list only — it is not a
+catalog filter.
 
-```python
-await mdl.browse_by_genre(1)                    # genre_id 1 = Action
-await mdl.browse_by_genre(13, source="top_movies", limit=5)
-# source: "search" (default feed) | "trending" | "top_movies"
-# each candidate = 1 upstream title-detail call — keep limit small
-```
-
-### Where genre/language data *does* appear
-
-| Source | Genre | Language |
+| Source | Genre | Language / country |
 |---|---|---|
 | `genres()` / `languages()` | ✅ full list | ✅ full list |
-| `title(id)` detail (`?expand=1`) | ✅ `genres[]` (`{id, name, slug, ...}`) | ✅ `language` + `country` |
-| `search(q)` results | ❌ none | ✅ `language`, `country` |
+| `title(id)` detail | ✅ `genres[]`, `tags[]` | ✅ `language`, `country` |
+| `search()` / `browse()` items | ❌ none (filter server-side instead) | ✅ `language`, `country` |
 | `calendar()`, `trending`, `top_movies` | ❌ none | ✅ `country`, `language` |
-
-Practical pattern: use `genres()` to build a picker UI, `search()` to browse
-with country/language/type/year post-filters, and `browse_by_genre()` (or
-iterate `title(id)` details) when you specifically need genre filtering.
 
 ## 📚 API docs & playground
 
@@ -443,6 +436,8 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/titles/{id}/recommendations` | `GET /titles/{id}/recommendations` | 10m | ✅ |
 | POST | `/api/v1/search?q={q}&page={page}` | `POST /search/titles?edge=1&q={q}&page={page}&synopsis=1` | 5m | ✅ |
 | POST | `/api/v1/search/people?q={q}&page={page}` | `POST /search/people?q={q}&page={page}` | 5m | ✅ |
+| POST | `/api/v1/search/users?q={q}` | `POST /search/users?q={q}` | 5m | ✅ |
+| GET | `/api/v1/browse?type=&genre=&country=&from=&sort=&page=` | `POST /search/titles?edge=1&types=&genres=&countries=&releases=&sort=` | 10m | ✅ |
 | GET | `/api/v1/watchlist` | `GET /sync/mylist/watchlist` | 1m | ✅ |
 | GET | `/api/v1/watchlist/{status}` | `GET /sync/mylist/{status}` | 1m | ✅ |
 | GET | `/api/v1/me` | `GET /users/me` | 1m | ✅ |
@@ -450,11 +445,25 @@ All responses are the **raw upstream JSON** (fastest path, zero transformation).
 | GET | `/api/v1/articles/featured?page={page}` | `GET /articles/featured` | 10m | — |
 | GET | `/api/v1/lists/featured?limit={limit}` | `GET /lists/featured` | 10m | — |
 | GET | `/api/v1/lists/popular?limit={limit}` | `GET /lists/popular_voting_lists` | 10m | — |
+| GET | `/api/v1/lists/trending?limit={limit}` | `GET /lists/trending` | 10m | — |
+| GET | `/api/v1/lists/recent?limit={limit}` | `GET /lists/recent_activity` | 10m | — |
+| GET | `/api/v1/articles/{id}` | `GET /articles/{id}` | 1h | — |
+| GET | `/api/v1/articles/categories` | `GET /articles/categories` | 24h | — |
+| GET | `/api/v1/recommendations?page={page}` | `GET /recommendations` | 10m | — |
+| GET | `/api/v1/titles/{id}/feed` | `GET /titles/{id}/feed` | 5m | — |
+| GET | `/api/v1/people/{id}/feed` | `GET /people/{id}/feed` | 5m | — |
+| GET | `/api/v1/people/{id}/gifts` | `GET /people/{id}/gifts` | 10m | — |
+| GET | `/api/v1/groups?page={page}` | `GET /groups` | 1h | — |
+| GET | `/api/v1/groups/{id}` | `GET /groups/{id}` | 1h | — |
+| GET | `/api/v1/reviews/{id}` | `GET /reviews/{id}` | 1h | — |
+| GET | `/api/v1/people/popular?page={page}` | `POST /search/people?limit=50&sort=popular` | 1h | ✅ |
 | GET | `/api/v1/people/leaderboard?period={alltime\|weekly\|monthly}` | `GET /people/leaderboard` | 10m | — |
 | GET | `/api/v1/people/{id}` | `GET /people/{id}` | 24h | — |
 | GET | `/api/v1/people/{id}/credits` | `GET /people/{id}/credits` | 24h | — |
 | GET | `/api/v1/users/{id}` | `GET /users/{id}` | 10m | — |
 | GET | `/api/v1/users/{id}/stats` | `GET /users/{id}/stats` | 10m | — |
+| GET | `/api/v1/users/{id or username}/lists` | `GET /users/{id}/lists` | 10m | ✅ |
+| GET | `/api/v1/users/{id or username}/friends` | `GET /users/{id}/friends` | 10m | ✅ |
 | GET | `/api/v1/tags/search?q={q}` | `GET /tags/search` | 10m | — |
 | GET | `/api/v1/payment/plans` | `GET /payment/plans` | 1h | — |
 | GET | `/api/v1/payment/coins` | `GET /payment/coins` | 1h | — |
@@ -869,10 +878,13 @@ Offline — no network needed:
 
 ```bash
 python -m pytest tests/ -q
-# 8 passed
+# 94 passed
 ```
 
-Covers: key decode, md5 formula, header scheme, TTL cache expiry, SQL cache change detection, route count, auth-offline, and leaderboard validation.
+Covers: headers and auth flow (login/refresh/deadlock regressions), upstream
+error mapping for both transports, cache (TTL/LRU, SQL change detection,
+coalescing), query encoding, route validation and mapping, browse filters, CLI
+output/errors/exit codes and logging. All offline — no network.
 
 ---
 

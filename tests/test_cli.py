@@ -222,3 +222,80 @@ def test_server_logging_level_and_format(monkeypatch):
     assert mdlaw.log.handlers[0].format(rec) == "INFO:     mdlaw: GET /x -> 200"
     mdlaw._setup_server_logging()  # idempotent: no second handler
     assert len(mdlaw.log.handlers) == 1
+
+
+def test_watchlist_uses_list_id_and_episode_progress(monkeypatch, capsys):
+    """Shape of /sync/mylist/<status> (verified against a real account)."""
+    items = [
+        {"list_id": 1, "episode_seen": 5, "rating": 0,
+         "title": {"id": 769141, "title": "Bloodhounds Season 2", "year": 2026, "episodes": 7}},
+        {"list_id": 1, "episode_seen": 14, "rating": 8,
+         "title": {"id": 778376, "title": "Phantom Lawyer", "year": 2026, "episodes": 16}},
+    ]
+    _, out, _ = cli(monkeypatch, capsys, ["watchlist", "-o", "text"], watchlist=items)
+    assert "5/7" in out and "14/16" in out
+    assert "2 titles in your watching list" in out
+    assert "Status" not in out  # single list → no redundant status column
+    mixed = items + [{"list_id": 2, "episode_seen": 8, "rating": 9.5,
+                      "title": {"id": 1, "title": "Done", "episodes": 8}}]
+    _, out, _ = cli(monkeypatch, capsys, ["watchlist", "-o", "text"], watchlist=mixed)
+    assert "completed" in out and "9.5" in out
+
+
+def test_title_card_real_fields(monkeypatch, capsys):
+    """Shape of /titles/{id}?expand=1 (verified live): ranked/popularity,
+    release_dates_fmt, runtime, tags, alt_titles; 99999 means unranked."""
+    detail = {"id": 686, "title": "Karei naru Spy", "year": 2009, "episodes": 10, "runtime": 45,
+              "rating": 6.9, "votes": 334, "ranked": 11994, "popularity": 99999,
+              "release_dates_fmt": "Jul 18, 2009 - Sep 26, 2009",
+              "alt_titles": ["A", "B", "C", "D"], "tags": [{"name": "Espionage"}],
+              "genres": [{"name": "Action"}], "permalink": "https://mydramalist.com/686-karei-naru-spy"}
+    _, out, _ = cli(monkeypatch, capsys, ["title", "686", "-o", "text"], title=detail)
+    assert "10 × 45 min" in out and "#11,994" in out and "334 votes" in out
+    assert "Popularity" not in out  # 99999 = not ranked
+    assert "A, B, C …" in out and "Espionage" in out and "Jul 18, 2009" in out
+
+
+def test_cli_browse_builds_filters_and_next_page(monkeypatch, capsys):
+    seen = {}
+
+    async def fake_browse(self, **kw):
+        seen.update(kw)
+        return [{"id": 35729, "title": "Crash Landing on You", "year": 2019,
+                 "media_type": "Korean Drama", "country": "South Korea", "rating": 9.0}]
+    monkeypatch.setattr(mdlaw.MDL, "browse", fake_browse)
+    code = mdlaw.main(["browse", "--type", "drama", "--genre", "romance", "--country", "korea",
+                       "--from", "2019", "--sort", "popular", "-o", "text"])
+    out = capsys.readouterr().out
+    assert code == 0 and "Crash Landing on You" in out
+    assert seen == {"types": ["drama"], "genres": ["romance"], "countries": ["korea"],
+                    "released_from": 2019, "sort": "popular", "page": 1}
+    assert ("next page: mdlaw browse --type drama --genre romance --country korea "
+            "--from 2019 --sort popular --page 2") in out
+
+
+def test_cli_browse_rejects_unknown_type(monkeypatch, capsys):
+    code, _, err = cli(monkeypatch, capsys, ["browse", "--type", "anime"])
+    assert code == 2 and "invalid choice" in err
+
+
+def test_cli_lists(monkeypatch, capsys):
+    lists = [{"id": 1, "name": "Best Romance", "count": 42, "total_likes": 1200, "total_views": 99000}]
+    _, out, _ = cli(monkeypatch, capsys, ["lists", "-o", "text"], lists_trending=lists)
+    assert "Best Romance" in out and "1,200" in out and "99,000" in out
+
+
+def test_cli_browse_unknown_country_is_usage_error(monkeypatch, capsys):
+    code, _, err = cli(monkeypatch, capsys, ["browse", "--country", "france"])
+    assert code == 2 and "unknown country 'france'" in err and "HTTP" not in err
+
+
+def test_cli_recommendations(monkeypatch, capsys):
+    recs = [{"id": 1, "content": "Same director, same narrative style.", "total_likes": 1200,
+             "author": {"display_name": "fan"},
+             "title": {"id": 10826, "title": "Signal", "year": 2016},
+             "similar": {"id": 7251, "title": "Tunnel", "year": 2017}}]
+    _, out, _ = cli(monkeypatch, capsys, ["recs", "-o", "text"], recommendations=recs)
+    assert "Liked Signal (2016) [10826]" in out and "→ try Tunnel (2017) [7251]" in out
+    assert "Same director" in out and "by fan · 1,200 likes" in out
+    assert "mdlaw recommendations --page 2" in out

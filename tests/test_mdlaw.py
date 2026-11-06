@@ -129,8 +129,8 @@ def test_ttl_cache():
 
 def test_route_count():
     routes = [r.path for r in mdlaw.app.routes if r.path.startswith("/api/")]
-    # 29 data routes + dashboard + status (36 total)
-    assert len(routes) == 36, routes
+    # 45 data routes + dashboard + status + auth/cache/health (52 total)
+    assert len(routes) == 52, routes
 
 
 def test_leaderboard_validation():
@@ -301,9 +301,9 @@ def test_search_postfilter(monkeypatch):
     asyncio.run(run())
 
 
-def test_browse_by_genre(monkeypatch):
-    # browse_by_genre() fetches candidate titles' detail and keeps those whose
-    # genres[] include the requested genre_id. Stub fetch offline.
+def test_browse_by_genre_detail_sources(monkeypatch):
+    # source="trending"/"top_movies": fetch candidate details and keep those
+    # whose genres[] include the requested genre_id. Stub fetch offline.
     feed = [{"id": 1, "title": "A"}, {"id": 2, "title": "B"}, {"id": 3, "title": "C"}]
     details = {
         1: {"id": 1, "genres": [{"id": 1, "name": "Action"}, {"id": 5, "name": "Adventure"}]},
@@ -319,9 +319,9 @@ def test_browse_by_genre(monkeypatch):
 
     async def run():
         mdl = mdlaw.MDL()
-        out = await mdl.browse_by_genre(1, limit=5)
+        out = await mdl.browse_by_genre(1, limit=5, source="trending")
         assert [i["id"] for i in out] == [1, 3]  # only titles whose genres include id 1
-        out2 = await mdl.browse_by_genre(13, limit=5)
+        out2 = await mdl.browse_by_genre(13, limit=5, source="top_movies")
         assert [i["id"] for i in out2] == [2]
     asyncio.run(run())
 

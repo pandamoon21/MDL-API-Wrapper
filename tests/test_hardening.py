@@ -419,3 +419,99 @@ def test_route_param_validation(monkeypatch):
     assert [r.status_code for r in bad] == [422] * 5
     assert [r.status_code for r in ok] == [200] * 3
     assert len(called) == 3
+
+
+# --- server-side browse ---------------------------------------------------
+
+GENRES = [{"id": 19, "name": "Romance", "slug": "romance"}, {"id": 14, "name": "Horror", "slug": "horror"}]
+
+
+def _capture(monkeypatch):
+    calls = []
+
+    async def fake_fetch(method, path, ttl=3600, auth=False, body=None, cache_key=None):
+        calls.append((method, path, auth))
+        return GENRES if path == "/genres" else [{"id": 1, "title": "X"}]
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    return calls
+
+
+def test_browse_path_resolves_names_and_ids(monkeypatch):
+    _capture(monkeypatch)
+    path = run(mdlaw.browse_path(types=["drama", "movie"], genres="romance,14",
+                                 countries=["korea", 1], released_from=2024, sort="popular", page=2))
+    assert path == ("/search/titles?edge=1&page=2&types=68%2C77&genres=19%2C14"
+                    "&countries=3%2C1&releases=2024&sort=popular")
+
+
+def test_browse_path_minimal_and_errors(monkeypatch):
+    _capture(monkeypatch)
+    assert run(mdlaw.browse_path()) == "/search/titles?edge=1&page=1&sort=top"
+    for kw in ({"types": "anime"}, {"countries": "france"}, {"genres": "nope"}, {"sort": "new"}):
+        with pytest.raises(HTTPException) as ei:
+            run(mdlaw.browse_path(**kw))
+        assert ei.value.status_code == 400
+
+
+def test_browse_genre_ids_skip_genre_lookup(monkeypatch):
+    calls = _capture(monkeypatch)
+    run(mdlaw.browse_path(genres=[19, "14"]))
+    assert not any(p == "/genres" for _, p, _ in calls)
+
+
+def test_browse_route_and_library(monkeypatch):
+    calls = _capture(monkeypatch)
+    with TestClient(mdlaw.app) as cl:
+        r = cl.get("/api/v1/browse?type=drama&genre=horror&country=japan&from=2020&sort=popular")
+        bad = cl.get("/api/v1/browse?sort=newest")
+    assert r.status_code == 200 and bad.status_code == 422
+    method, path, auth = calls[-1]
+    assert method == "POST" and auth is True
+    assert "types=68" in path and "genres=14" in path and "countries=1" in path
+    assert "releases=2020" in path and "sort=popular" in path
+
+
+def test_browse_by_genre_uses_server_filter(monkeypatch):
+    calls = _capture(monkeypatch)
+
+    async def go():
+        return await mdlaw.MDL().browse_by_genre(19, limit=1)
+    assert run(go()) == [{"id": 1, "title": "X"}]
+    assert calls == [("POST", "/search/titles?edge=1&page=1&genres=19&sort=top", True)]
+
+
+def test_new_public_and_auth_routes_map_upstream(monkeypatch):
+    calls = _capture(monkeypatch)
+    with TestClient(mdlaw.app) as cl:
+        for method, url in [("GET", "/api/v1/lists/trending?limit=3"), ("GET", "/api/v1/lists/recent"),
+                            ("GET", "/api/v1/people/popular?page=2"), ("POST", "/api/v1/search/users?q=ab"),
+                            ("GET", "/api/v1/users/pandamoon21/lists"), ("GET", "/api/v1/users/7/friends"),
+                            ("GET", "/api/v1/reviews/65233"), ("GET", "/api/v1/articles/27182")]:
+            assert cl.request(method, url).status_code == 200, url
+        assert cl.get("/api/v1/users/bad name/lists").status_code == 422
+        assert cl.get("/api/v1/people/12").status_code == 200  # /people/{pid} still works
+    assert calls == [
+        ("GET", "/lists/trending?limit=3", False), ("GET", "/lists/recent_activity?limit=5", False),
+        ("POST", "/search/people?page=2&limit=50&sort=popular", True),
+        ("POST", "/search/users?q=ab", True), ("GET", "/users/pandamoon21/lists", True),
+        ("GET", "/users/7/friends", True), ("GET", "/reviews/65233", False),
+        ("GET", "/articles/27182", False), ("GET", "/people/12", False),
+    ]
+
+
+def test_web_derived_routes_map_upstream_anonymously(monkeypatch):
+    """Endpoints found in the website's JS and verified on the mobile API.
+    Feeds are fetched without a token so the operator's account never shows."""
+    calls = _capture(monkeypatch)
+    with TestClient(mdlaw.app) as cl:
+        for url in ("/api/v1/recommendations?page=2", "/api/v1/titles/35729/feed",
+                    "/api/v1/people/14352/feed", "/api/v1/people/14352/gifts",
+                    "/api/v1/articles/categories", "/api/v1/articles/27182",
+                    "/api/v1/groups?page=3", "/api/v1/groups/1"):
+            assert cl.get(url).status_code == 200, url
+    assert calls == [
+        ("GET", "/recommendations?page=2", False), ("GET", "/titles/35729/feed", False),
+        ("GET", "/people/14352/feed", False), ("GET", "/people/14352/gifts", False),
+        ("GET", "/articles/categories", False), ("GET", "/articles/27182", False),
+        ("GET", "/groups?page=3", False), ("GET", "/groups/1", False),
+    ]

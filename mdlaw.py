@@ -57,7 +57,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
 # (lighter, no curl_cffi needed) — works from most residential IPs.
 TRANSPORT = os.environ.get("MDL_TRANSPORT", "curl_cffi").strip().lower()
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # Library code only logs to this logger. The CLI (-v / -vv) and the server
 # (MDL_LOG_LEVEL) attach handlers; library users configure it themselves.
@@ -910,6 +910,97 @@ Page = Annotated[int, Query(ge=1, le=1000)]
 Limit = Annotated[int, Query(ge=1, le=100)]
 SearchQ = Annotated[str, Query(min_length=1, max_length=200)]
 PosId = Annotated[int, Path(ge=1)]
+UserRef = Annotated[str, Path(pattern=r"^[A-Za-z0-9_.-]{1,64}$",
+                              description="numeric user id or username")]
+
+# Server-side browse: POST /search/titles accepts filter params (recovered
+# from the app's strings, ids verified live 2026-11-06). No `q` needed.
+BROWSE_TYPES = {"drama": 68, "movie": 77, "tv-show": 86}
+BROWSE_COUNTRIES = {"japan": 1, "china": 2, "south-korea": 3, "hong-kong": 4,
+                    "taiwan": 5, "thailand": 6}
+BROWSE_SORTS = ("top", "popular")
+_BROWSE_ALIASES = {"korea": "south-korea", "kr": "south-korea", "jp": "japan", "cn": "china",
+                   "hk": "hong-kong", "tw": "taiwan", "th": "thailand", "tv": "tv-show",
+                   "show": "tv-show", "tvshow": "tv-show", "film": "movie", "films": "movie",
+                   "dramas": "drama", "movies": "movie"}
+
+
+def _slug(text: object) -> str:
+    return "-".join(str(text).strip().lower().replace("_", " ").split())
+
+
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(400, {"error": True, "code": 400, "detail": detail})
+
+
+def _as_list(values: object) -> list[str]:
+    """None | 'a,b' | ['a', 3] → ['a', 'b', '3']"""
+    if values is None:
+        return []
+    items = values if isinstance(values, (list, tuple, set)) else [values]
+    return [part.strip() for v in items for part in str(v).split(",") if part.strip()]
+
+
+def _filter_ids(values: object, table: dict[str, int], kind: str) -> list[int]:
+    out = []
+    for v in _as_list(values):
+        if v.isdigit():
+            out.append(int(v))
+            continue
+        key = _BROWSE_ALIASES.get(_slug(v), _slug(v))
+        if key not in table:
+            raise _bad_request(f"unknown {kind} {v!r}; use one of: {', '.join(table)} "
+                               "(or a numeric id)")
+        out.append(table[key])
+    return out
+
+
+async def _genre_ids(values: object) -> list[int]:
+    """Genre names/slugs/ids → ids, resolved against GET /genres (cached 1h)."""
+    vals = _as_list(values)
+    if all(v.isdigit() for v in vals):
+        return [int(v) for v in vals]
+    catalog = await fetch("GET", "/genres", ttl=3600)
+    by_name: dict[str, int] = {}
+    for g in catalog if isinstance(catalog, list) else []:
+        if isinstance(g, dict) and isinstance(g.get("id"), int):
+            for k in (g.get("name"), g.get("slug")):
+                if k:
+                    by_name[_slug(k)] = g["id"]
+    out = []
+    for v in vals:
+        gid = int(v) if v.isdigit() else by_name.get(_slug(v))
+        if gid is None:
+            raise _bad_request(f"unknown genre {v!r}; see /api/v1/genres for names and ids")
+        out.append(gid)
+    return out
+
+
+async def browse_path(*, types: object = None, genres: object = None, countries: object = None,
+                      released_from: int | None = None, sort: str = "top", page: int = 1,
+                      q: str | None = None) -> str:
+    """Build the upstream POST /search/titles path for a filtered browse.
+
+    ``types``/``countries`` take names (``drama``, ``south-korea``) or ids;
+    ``genres`` takes names, slugs or ids. Lists or comma-separated strings.
+    ``released_from`` keeps titles released in that year or later.
+    """
+    if sort not in BROWSE_SORTS:
+        raise _bad_request(f"sort must be one of: {', '.join(BROWSE_SORTS)}")
+    params: dict[str, object] = {"edge": 1}
+    if q:
+        params["q"] = q
+    params["page"] = page
+    if t := _filter_ids(types, BROWSE_TYPES, "type"):
+        params["types"] = ",".join(map(str, t))
+    if g := await _genre_ids(genres):
+        params["genres"] = ",".join(map(str, g))
+    if c := _filter_ids(countries, BROWSE_COUNTRIES, "country"):
+        params["countries"] = ",".join(map(str, c))
+    if released_from:
+        params["releases"] = int(released_from)
+    params["sort"] = sort
+    return _qs("/search/titles", **params)
 
 # Inbound protection (all optional, off by default):
 #   MDL_ADMIN_TOKEN  — enables POST /api/v1/auth/{login,refresh}; callers must
@@ -1138,6 +1229,29 @@ async def search_people(q: SearchQ, page: Page = 1) -> JSONResponse:
         ttl=300, auth=True), 300)
 
 
+@app.get("/api/v1/browse")
+async def browse(
+    kind: Annotated[list[str] | None, Query(alias="type", description="drama | movie | tv-show (or id); repeatable")] = None,
+    genre: Annotated[list[str] | None, Query(description="genre name or id; repeatable")] = None,
+    country: Annotated[list[str] | None, Query(description="japan | china | south-korea | hong-kong | taiwan | thailand (or id)")] = None,
+    released_from: Annotated[int | None, Query(alias="from", ge=1900, le=2100, description="released in this year or later")] = None,
+    sort: Annotated[str, Query(pattern="^(top|popular)$")] = "top",
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    page: Page = 1,
+) -> JSONResponse:
+    """Browse the catalog with server-side filters (requires auth).
+    Upstream: POST /search/titles?edge=1&types=&genres=&countries=&releases=&sort="""
+    path = await browse_path(types=kind, genres=genre, countries=country,
+                             released_from=released_from, sort=sort, page=page, q=q)
+    return _resp(await fetch("POST", path, ttl=600, auth=True), 600)
+
+
+@app.post("/api/v1/search/users")
+async def search_users(q: SearchQ) -> JSONResponse:
+    """Search MDL users by name (requires auth)."""
+    return _resp(await fetch("POST", _qs("/search/users", q=q), ttl=300, auth=True), 300)
+
+
 @app.get("/api/v1/watchlist")
 async def watchlist() -> JSONResponse:
     """Current user's watchlist (requires auth)."""
@@ -1192,6 +1306,25 @@ async def lists_popular(limit: Limit = 5) -> JSONResponse:
     return _resp(await fetch("GET", f"/lists/popular_voting_lists?limit={limit}", ttl=600), 600)
 
 
+@app.get("/api/v1/lists/trending")
+async def lists_trending(limit: Limit = 5) -> JSONResponse:
+    """Trending user lists."""
+    return _resp(await fetch("GET", f"/lists/trending?limit={limit}", ttl=600), 600)
+
+
+@app.get("/api/v1/lists/recent")
+async def lists_recent(limit: Limit = 5) -> JSONResponse:
+    """Lists with recent activity."""
+    return _resp(await fetch("GET", f"/lists/recent_activity?limit={limit}", ttl=600), 600)
+
+
+@app.get("/api/v1/people/popular")
+async def people_popular(page: Page = 1) -> JSONResponse:
+    """Most popular people, 50 per page (requires auth)."""
+    return _resp(await fetch("POST", _qs("/search/people", page=page, limit=50, sort="popular"),
+                             ttl=3600, auth=True), 3600)
+
+
 @app.get("/api/v1/people/leaderboard")
 async def leaderboard(period: str = "alltime") -> JSONResponse:
     if period not in ("alltime", "weekly", "monthly"):
@@ -1221,6 +1354,72 @@ async def user(uid: PosId) -> JSONResponse:
 async def user_stats(uid: PosId) -> JSONResponse:
     """Public user stats (collected/rated counts, distribution)."""
     return _resp(await fetch("GET", f"/users/{uid}/stats", ttl=600), 600)
+
+
+@app.get("/api/v1/users/{user}/lists")
+async def user_lists(user: UserRef) -> JSONResponse:
+    """A user's custom lists (requires auth). ``user`` = id or username."""
+    return _resp(await fetch("GET", f"/users/{user}/lists", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/users/{user}/friends")
+async def user_friends(user: UserRef) -> JSONResponse:
+    """A user's friends (requires auth). ``user`` = id or username."""
+    return _resp(await fetch("GET", f"/users/{user}/friends", ttl=600, auth=True), 600)
+
+
+@app.get("/api/v1/recommendations")
+async def recommendations(page: Page = 1) -> JSONResponse:
+    """Community recommendations: "if you liked X, watch Y", with the reason."""
+    return _resp(await fetch("GET", f"/recommendations?page={page}", ttl=600), 600)
+
+
+@app.get("/api/v1/titles/{tid}/feed")
+async def title_feed(tid: PosId) -> JSONResponse:
+    """Community activity about a title (fetched anonymously)."""
+    return _resp(await fetch("GET", f"/titles/{tid}/feed", ttl=300), 300)
+
+
+@app.get("/api/v1/people/{pid}/feed")
+async def people_feed(pid: PosId) -> JSONResponse:
+    """Community activity about a person (fetched anonymously)."""
+    return _resp(await fetch("GET", f"/people/{pid}/feed", ttl=300), 300)
+
+
+@app.get("/api/v1/people/{pid}/gifts")
+async def people_gifts(pid: PosId) -> JSONResponse:
+    """Flowers sent to a person: top and most recent givers."""
+    return _resp(await fetch("GET", f"/people/{pid}/gifts", ttl=600), 600)
+
+
+@app.get("/api/v1/articles/categories")
+async def articles_categories() -> JSONResponse:
+    """Article categories (news, interviews, …)."""
+    return _resp(await fetch("GET", "/articles/categories", ttl=86400), 86400)
+
+
+@app.get("/api/v1/groups")
+async def groups(page: Page = 1) -> JSONResponse:
+    """Community groups, 20 per page."""
+    return _resp(await fetch("GET", f"/groups?page={page}", ttl=3600), 3600)
+
+
+@app.get("/api/v1/groups/{gid}")
+async def group(gid: PosId) -> JSONResponse:
+    """A community group."""
+    return _resp(await fetch("GET", f"/groups/{gid}", ttl=3600), 3600)
+
+
+@app.get("/api/v1/reviews/{rid}")
+async def review(rid: PosId) -> JSONResponse:
+    """A single review: ratings breakdown, text, author, title."""
+    return _resp(await fetch("GET", f"/reviews/{rid}", ttl=3600), 3600)
+
+
+@app.get("/api/v1/articles/{aid}")
+async def article(aid: PosId) -> JSONResponse:
+    """A single article (news/feature) with its body text."""
+    return _resp(await fetch("GET", f"/articles/{aid}", ttl=3600), 3600)
 
 
 @app.get("/api/v1/tags/search")
@@ -1397,21 +1596,38 @@ class MDL:
             filtered = [it for it in filtered if it.get("year") == int(year)]
         return filtered[:limit] if limit else filtered
 
+    async def browse(self, types: object = None, genres: object = None,
+                     countries: object = None, released_from: int | None = None,
+                     sort: str = "top", page: int = 1, q: str | None = None) -> object:
+        """Browse the catalog with **server-side** filters (requires auth).
+
+        ``types``: ``"drama"``, ``"movie"``, ``"tv-show"`` (or ids 68/77/86);
+        ``genres``: names, slugs or ids from :meth:`genres`; ``countries``:
+        ``"japan"``, ``"china"``, ``"south-korea"``, ``"hong-kong"``,
+        ``"taiwan"``, ``"thailand"`` (or ids 1–6). Each accepts a single value
+        or a list. ``released_from``: year (inclusive). ``sort``: ``"top"``
+        (by rating) or ``"popular"``. 20 results per page.
+
+            await mdl.browse(types="drama", genres="romance",
+                             countries="south-korea", sort="popular")
+        """
+        path = await browse_path(types=types, genres=genres, countries=countries,
+                                 released_from=released_from, sort=sort, page=page, q=q)
+        return await self.post(path, {}, ttl=600, auth=True)
+
     async def browse_by_genre(self, genre_id: int, limit: int = 10,
                               source: str = "search") -> list:
-        """Fetch titles and keep only those whose detail includes ``genre_id``.
+        """Titles in ``genre_id``.
 
-        The upstream API has no server-side genre filter, and search results
-        carry no genres field — the only place ``genres[]`` appears is the
-        title-detail endpoint. So this fetches each candidate's detail
-        (auth-gated) and filters client-side. ``source`` picks the candidate
-        pool: ``"search"`` (default feed), ``"trending"`` or ``"top_movies"``.
-        Each detail fetch is a separate upstream call — keep ``limit`` small.
+        ``source="search"`` (default) uses the server-side genre filter — one
+        request, returns search items (no ``genres`` field). ``"trending"`` /
+        ``"top_movies"`` keep the old behaviour: fetch each candidate's detail
+        (one auth-gated call per title) and return the matching details.
         """
-        pool: object
         if source == "search":
-            pool = await self.search("")          # empty query → upstream default feed
-        elif source == "trending":
+            items = await self.browse(genres=genre_id)
+            return items[:limit] if isinstance(items, list) else []
+        if source == "trending":
             pool = await self.get(f"/titles/trending?limit={max(limit * 2, 10)}",
                                   ttl=300, auth=True)
         elif source == "top_movies":
@@ -1437,6 +1653,64 @@ class MDL:
                 if len(out) >= limit:
                     break
         return out
+
+    async def people_popular(self, page: int = 1) -> object:
+        """Most popular people, 50 per page (requires auth)."""
+        return await self.post(_qs("/search/people", page=page, limit=50, sort="popular"), {},
+                               ttl=3600, auth=True)
+
+    async def search_users(self, q: str) -> object:
+        """Search MDL users by name (requires auth)."""
+        return await self.post(_qs("/search/users", q=q), {}, ttl=300, auth=True)
+
+    async def lists_trending(self, limit: int = 5) -> object:
+        return await self.get(f"/lists/trending?limit={limit}", ttl=600)
+
+    async def lists_recent(self, limit: int = 5) -> object:
+        """Lists with recent activity."""
+        return await self.get(f"/lists/recent_activity?limit={limit}", ttl=600)
+
+    async def user_lists(self, user: int | str) -> object:
+        """A user's custom lists (id or username; requires auth)."""
+        return await self.get(f"/users/{user}/lists", ttl=600, auth=True)
+
+    async def user_friends(self, user: int | str) -> object:
+        """A user's friends (id or username; requires auth)."""
+        return await self.get(f"/users/{user}/friends", ttl=600, auth=True)
+
+    async def recommendations(self, page: int = 1) -> object:
+        """Community recommendations: "if you liked X, watch Y", with the reason."""
+        return await self.get(f"/recommendations?page={page}", ttl=600)
+
+    async def title_feed(self, tid: int) -> object:
+        """Community activity about a title."""
+        return await self.get(f"/titles/{tid}/feed", ttl=300)
+
+    async def people_feed(self, pid: int) -> object:
+        """Community activity about a person."""
+        return await self.get(f"/people/{pid}/feed", ttl=300)
+
+    async def people_gifts(self, pid: int) -> object:
+        """Flowers sent to a person: ``top`` and ``recents`` givers."""
+        return await self.get(f"/people/{pid}/gifts", ttl=600)
+
+    async def articles_categories(self) -> object:
+        return await self.get("/articles/categories", ttl=86400)
+
+    async def groups(self, page: int = 1) -> object:
+        """Community groups, 20 per page (``{"items": [...]}``)."""
+        return await self.get(f"/groups?page={page}", ttl=3600)
+
+    async def group(self, gid: int) -> object:
+        return await self.get(f"/groups/{gid}", ttl=3600)
+
+    async def review(self, rid: int) -> object:
+        """A single review: ratings breakdown, text, author, title."""
+        return await self.get(f"/reviews/{rid}", ttl=3600)
+
+    async def article(self, aid: int) -> object:
+        """A single article with its body text."""
+        return await self.get(f"/articles/{aid}", ttl=3600)
 
     async def search_people(self, q: str, page: int = 1) -> object:
         return await self.post(_qs("/search/people", q=q, page=page), {},
@@ -1520,6 +1794,8 @@ examples:
   mdlaw search "crash landing"      search titles
   mdlaw title 686                   title detail
   mdlaw people 14352                actor profile
+  mdlaw browse --type drama --genre romance --country korea --sort popular
+  mdlaw recs                        community picks: "liked X → try Y"
   mdlaw calendar --days 3           episodes airing in the next 3 days
   mdlaw leaderboard weekly -n 10    top 10 actors this week
   mdlaw genres --json | jq '.[].name'
@@ -1592,6 +1868,17 @@ def _positive_int(text: str) -> int:
     return n
 
 
+def _country(text: str) -> str:
+    """Validate --country locally (name, alias or id) so typos are usage errors."""
+    try:
+        _filter_ids(text, BROWSE_COUNTRIES, "country")
+    except HTTPException:
+        raise argparse.ArgumentTypeError(
+            f"unknown country {text!r} (choose from {', '.join(BROWSE_COUNTRIES)}, "
+            "korea, jp, … or an id)") from None
+    return text
+
+
 def _limit(text: str) -> int:
     try:
         n = int(text)
@@ -1657,6 +1944,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--country", help="keep only this country, e.g. 'South Korea'")
     p.add_argument("--type", help="keep only this type, e.g. Drama or Movie")
     p.add_argument("--year", type=_positive_int, help="keep only this release year")
+    p = cmd("browse", "* browse the catalog with filters (type, genre, country, year)")
+    p.add_argument("--type", dest="types", action="append", choices=list(BROWSE_TYPES),
+                   help="repeatable")
+    p.add_argument("--genre", dest="genres", action="append", metavar="GENRE",
+                   help="genre name or id, e.g. romance; repeatable (see `mdlaw genres`)")
+    p.add_argument("--country", dest="countries", action="append", metavar="COUNTRY", type=_country,
+                   help=f"{' | '.join(BROWSE_COUNTRIES)}; repeatable")
+    p.add_argument("--from", dest="released_from", type=_positive_int, metavar="YEAR",
+                   help="released in YEAR or later")
+    p.add_argument("--sort", choices=BROWSE_SORTS, default="top",
+                   help="top = highest rated (default), popular = most watched")
+    p.add_argument("--page", type=_positive_int, default=1)
+    p = cmd("recommendations", "community picks: \"if you liked X, watch Y\"", aliases=["recs"])
+    p.add_argument("--page", type=_positive_int, default=1)
+    p = cmd("lists", "user lists: trending (default), recent, popular, featured")
+    p.add_argument("which", nargs="?", default="trending",
+                   choices=("trending", "recent", "popular", "featured"))
     p = cmd("search-people", "* search actors and crew")
     p.add_argument("query", nargs="+")
     p.add_argument("--page", type=_positive_int, default=1)
@@ -1664,8 +1968,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("id", type=_positive_int, help="title id (from search results)")
     p = cmd("people", "actor / crew profile")
     p.add_argument("id", type=_positive_int, help="person id")
-    p = cmd("watchlist", "* your watchlist")
-    p.add_argument("status", nargs="?", choices=_WATCH_STATUSES)
+    p = cmd("watchlist", "* your lists (default: what you're watching)")
+    p.add_argument("status", nargs="?", choices=_WATCH_STATUSES,
+                   help="which list; omit for the titles you're currently watching")
     cmd("me", "* your profile")
     p = cmd("leaderboard", "most popular actors")
     p.add_argument("period", nargs="?", default="alltime",
@@ -1807,6 +2112,11 @@ def _mdl_url(slug: object) -> str | None:
     return s if s.startswith("http") else "https://mydramalist.com/" + s.lstrip("/")
 
 
+def _rank(v: object) -> str | None:
+    """'#11,994'; MDL uses 99999 for 'not ranked'."""
+    return f"#{v:,}" if isinstance(v, int) and 0 < v < 99999 else None
+
+
 def _year(d: dict) -> str:
     y = _pick(d, "year", "released_year")
     if y:
@@ -1867,19 +2177,87 @@ def _render_calendar(data: object, args) -> list[str]:
     return out
 
 
+def _title_table(items: list) -> list[list[object]]:
+    return [[i.get("id"), _pick(i, "title", "name"), _year(i),
+              _pick(i, "media_type", "type", "content_type"), _pick(i, "country", "language"),
+              _rating(i)] for i in items]
+
+
 def _render_search(data: object, args) -> list[str]:
     items = [i for i in _items(data) if isinstance(i, dict)]
     if not items:
         return ["No titles found."]
-    rows = [[i.get("id"), _pick(i, "title", "name"), _year(i),
-             _pick(i, "media_type", "type", "content_type"), _pick(i, "country", "language"),
-             _rating(i)] for i in items]
-    rows, more = _limited(rows, args.limit, None)
+    rows, more = _limited(_title_table(items), args.limit, None)
     q = " ".join(args.query)
     out = _table(["ID", "Title", "Year", "Type", "Country", "Rating"], rows)
     out += ["", f"page {args.page} · details: mdlaw title <ID> · next page: "
                 f"mdlaw search {shlex.quote(q)} --page {args.page + 1}"]
     return out + ([more] if more else [])
+
+
+def _browse_cmd(args, page: int) -> str:
+    parts = ["mdlaw browse"]
+    parts += [f"--type {t}" for t in args.types or []]
+    parts += [f"--genre {shlex.quote(g)}" for g in args.genres or []]
+    parts += [f"--country {shlex.quote(c)}" for c in args.countries or []]
+    if args.released_from:
+        parts.append(f"--from {args.released_from}")
+    if args.sort != "top":
+        parts.append(f"--sort {args.sort}")
+    return " ".join(parts + [f"--page {page}"])
+
+
+def _render_browse(data: object, args) -> list[str]:
+    items = [i for i in _items(data) if isinstance(i, dict)]
+    if not items:
+        return ["No titles match these filters." + (" Try an earlier page." if args.page > 1 else "")]
+    rows, more = _limited(_title_table(items), args.limit, None)
+    out = _table(["ID", "Title", "Year", "Type", "Country", "Rating"], rows)
+    out += ["", f"page {args.page} · sorted by {args.sort} · details: mdlaw title <ID>",
+            f"next page: {_browse_cmd(args, args.page + 1)}"]
+    return out + ([more] if more else [])
+
+
+def _render_recommendations(data: object, args) -> list[str]:
+    recs = [r for r in _items(data) if isinstance(r, dict)]
+    if not recs:
+        return ["No recommendations."]
+    recs, more = _limited(recs, args.limit, 10)
+    width = min(_term_width(), 100)
+    out: list[str] = []
+    for r in recs:
+        a = r.get("title") if isinstance(r.get("title"), dict) else {}
+        b = r.get("similar") if isinstance(r.get("similar"), dict) else {}
+
+        def name(t: dict) -> str:
+            y = _year(t)
+            return f"{_clean(t.get('title'))}" + (f" ({y})" if y else "") + f" [{t.get('id')}]"
+        out.append(f"Liked {name(a)}")
+        out.append(f"  → try {name(b)}")
+        reason = _clean(r.get("content"))
+        if reason:
+            out += textwrap.wrap(f'"{reason}"', width, initial_indent="    ",
+                                 subsequent_indent="     ")[:4]
+        who = _clean((r.get("author") or {}).get("display_name"))
+        likes = _num(r.get("total_likes"))
+        meta = " · ".join(x for x in (f"by {who}" if who else "", f"{likes} likes" if likes else "") if x)
+        if meta:
+            out.append(f"    {meta}")
+        out.append("")
+    out.append(f"page {args.page} · details: mdlaw title <ID> · next: "
+               f"mdlaw recommendations --page {args.page + 1}")
+    return out + ([more] if more else [])
+
+
+def _render_lists(data: object, args) -> list[str]:
+    items = [i for i in _items(data, "lists") if isinstance(i, dict)]
+    if not items:
+        return ["No lists."]
+    rows = [[i.get("id"), _pick(i, "name", "title"), _num(i.get("count")) or _clean(i.get("count")),
+             _num(i.get("total_likes")), _num(i.get("total_views"))] for i in items]
+    rows, more = _limited(rows, args.limit, None)
+    out = _table(["ID", "List", "Titles", "Likes", "Views"], rows)
+    return out + ["", f"{args.which} lists · -n N for more"] + ([more] if more else [])
 
 
 def _render_search_people(data: object, args) -> list[str]:
@@ -1907,18 +2285,28 @@ def _render_title(data: object, args) -> list[str]:
         genres = [g.strip() for g in genres.split(",")]
     rating = _rating(data)
     votes = _pick(data, "votes", "rating_count")
+    eps, runtime = data.get("episodes"), data.get("runtime")
+    aired = _pick(data, "release_dates_fmt", "aired")
+    if not aired and data.get("aired_start"):
+        aired = " – ".join(str(x) for x in (data.get("aired_start"), data.get("aired_end")) if x)
+    alt = data.get("alt_titles")
     fields = [
         ("Native title", _pick(data, "original_title", "native_title")),
+        ("Also known as", ", ".join(map(str, alt[:3])) + (" …" if len(alt) > 3 else "")
+         if isinstance(alt, list) and alt else None),
         ("Type", _pick(data, "media_type", "type", "content_type")),
         ("Country", data.get("country")),
-        ("Language", data.get("language")),
-        ("Episodes", data.get("episodes")),
+        ("Episodes", (f"{eps}" + (f" × {runtime} min" if runtime else "")) if eps else None),
+        ("Aired", aired),
+        ("Status", data.get("status")),
         ("Rating", f"{rating}/10" + (f" ({_num(votes) or votes} votes)" if votes else "")
          if rating else None),
-        ("Ranked", f"#{_clean(data['ranking'])}" if data.get("ranking") not in _EMPTY
-         and data.get("ranking") != 99999 else None),
+        ("Ranked", _rank(_pick(data, "ranked", "ranking"))),
+        ("Popularity", _rank(data.get("popularity"))),
+        ("Watchers", _num(data.get("watchers"))),
+        ("Certification", data.get("certification")),
         ("Genres", genres),
-        ("Aired", _pick(data, "aired", "released", "aired_start")),
+        ("Tags", data.get("tags")),
         ("Link", _mdl_url(_pick(data, "permalink", "url", "slug"))),
     ]
     return _card(f"{name} ({year})" if year else name, fields,
@@ -1972,6 +2360,8 @@ def _render_profile(data: object, args) -> list[str]:
         ("Followers", _num(data.get("followers"))),
         ("Following", _num(data.get("following"))),
         ("Points", _num(data.get("points"))),
+        ("Contributions", _num(data.get("contributions_points"))),
+        ("Roles", [r.get("name") for r in data.get("roles") or [] if isinstance(r, dict)]),
         ("VIP", "yes" if data.get("vip") else None),
     ]
     if not any(_clean(v) for _, v in fields):
@@ -1979,19 +2369,36 @@ def _render_profile(data: object, args) -> list[str]:
     return _card(name, fields, body=data.get("about"))
 
 
+# list_id → status, verified against the /sync/mylist/<status> endpoints.
+_LIST_STATUS = {1: "watching", 2: "completed", 3: "plan to watch", 4: "on hold",
+                5: "dropped", 6: "not interested"}
+
+
 def _render_watchlist(data: object, args) -> list[str]:
     items = [i for i in _items(data, "list", "watchlist") if isinstance(i, dict)]
     if not items:
-        return _render_generic(data, args) if data not in _EMPTY else ["Your list is empty."]
+        return [f"Nothing in your {args.status or 'watching'} list."]
     rows = []
     for i in items:
         t = i.get("title") if isinstance(i.get("title"), dict) else i
+        seen, total = i.get("episode_seen"), t.get("episodes")
+        progress = f"{seen}/{total}" if isinstance(seen, int) and total else _clean(seen)
+        score = i.get("rating")
         rows.append([t.get("id"), _pick(t, "title", "name"), _year(t),
-                     _pick(i, "status", "list_status"), _pick(i, "progress", "episodes_watched"),
-                     _pick(i, "score", "user_rating") or ""])
-    rows, more = _limited(rows, args.limit, None)
-    out = _table(["ID", "Title", "Year", "Status", "Progress", "Score"], rows)
-    return out + ["", f"{len(items)} titles"] + ([more] if more else [])
+                     _LIST_STATUS.get(i.get("list_id"), _clean(_pick(i, "status"))),
+                     progress, f"{score:g}" if isinstance(score, (int, float)) and score else ""])
+    show_status = len({r[3] for r in rows}) > 1
+    headers = ["ID", "Title", "Year", "Status", "Progress", "Score"]
+    if not show_status:  # one list → the status column is redundant
+        headers.pop(3)
+        rows = [r[:3] + r[4:] for r in rows]
+    rows, more = _limited(rows, args.limit, 50)
+    label = args.status or "watching"
+    out = _table(headers, rows)
+    out += ["", f"{len(items)} titles in your {label} list · details: mdlaw title <ID>"]
+    if not args.status:
+        out.append("other lists: mdlaw watchlist completed|plantowatch|onhold|dropped|notinterested")
+    return out + ([more] if more else [])
 
 
 _GENERIC_COLS = (("ID", ("id", "rid")), ("Name", ("title", "name", "display_name", "username")),
@@ -2025,6 +2432,8 @@ _RENDERERS = {
     "calendar": _render_calendar, "search": _render_search,
     "search-people": _render_search_people, "title": _render_title,
     "people": _render_people, "watchlist": _render_watchlist,
+    "browse": _render_browse, "lists": _render_lists,
+    "recommendations": _render_recommendations, "recs": _render_recommendations,
     "me": _render_profile, "leaderboard": _render_leaderboard,
 }
 
@@ -2157,6 +2566,16 @@ async def _call(args) -> object:
                                     type=args.type, year=args.year, page=args.page)
         if c == "search-people":
             return await mdl.search_people(" ".join(args.query), page=args.page)
+        if c == "browse":
+            return await mdl.browse(types=args.types, genres=args.genres,
+                                    countries=args.countries, released_from=args.released_from,
+                                    sort=args.sort, page=args.page)
+        if c in ("recommendations", "recs"):
+            return await mdl.recommendations(page=args.page)
+        if c == "lists":
+            n = max(args.limit or 10, 1)
+            return await {"trending": mdl.lists_trending, "recent": mdl.lists_recent,
+                          "popular": mdl.lists_popular, "featured": mdl.lists_featured}[args.which](n)
         if c == "title":
             return await mdl.title(args.id)
         if c == "people":

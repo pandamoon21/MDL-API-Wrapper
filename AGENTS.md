@@ -39,14 +39,14 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 80 passed
+python3 -m pytest tests/ -q      # expect: 94 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/              # 80 offline checks (no network); conftest.py isolates state
+tests/              # 94 offline checks (no network); conftest.py isolates state
 .github/workflows/  # docker.yml (GHCR on tags), ci.yml (ruff + pytest, manual only)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
@@ -96,15 +96,15 @@ import time (no dotenv loader — set them in the shell or a process manager).
 - **Auth**: logs in once with env credentials (`POST /auth/login`, password
   MD5-hashed), decodes JWT `exp`, refreshes before expiry, re-logs in if
   refresh fails. 2FA is NOT supported (returns 428).
-- **Genres & languages are reference lists, not filters**: `GET /genres` and
-  `GET /languages/supported?v=2` return full catalogs. Search is
-  `POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1` — `q`/`page` are
-  URL query params, NOT a JSON body — GET → 405. Search items carry
-  `country`/`language`/`type`/`media_type`/`year` but no `genres` field; only
-  `title(id)` detail has `genres[]`. No server-side browse/filter endpoint
-  exists (404/405). `MDL.search()` post-filters client-side on those fields;
-  `MDL.browse_by_genre()` fetches details and filters by genre (1 upstream
-  call per candidate — keep limit small).
+- **Search & browse**: `POST /search/titles?edge=1&page=<page>` — params are
+  URL query params, NOT a JSON body (GET → 405). With `q` it searches; without
+  it, it is the catalog browser with server-side filters `types`
+  (68 drama, 77 movie, 86 tv-show), `genres` (ids from `/genres`),
+  `countries` (1 Japan, 2 China, 3 Korea, 4 HK, 5 Taiwan, 6 Thailand),
+  `releases` (year, inclusive) and `sort` (`top`|`popular`), comma-joined for
+  several values. Build it with `browse_path()`. `status`/`ratings`/`start`/
+  `tags` exist in the app but their formats are unknown — don't expose them
+  until verified. Search items have no `genres` field.
 
 ## Conventions & pitfalls
 
@@ -141,6 +141,13 @@ import time (no dotenv loader — set them in the shell or a process manager).
 - **SQL cache keeps expired rows** — change detection compares against them.
   `SQLCache.prune()` drops rows expired > 7 days.
 - **Never return `_auth` from a route** — it holds the access/refresh tokens.
+- **Public endpoints stay anonymous** (`auth=False`): some (e.g. `/titles/{id}/feed`)
+  include a `current_user` object when a token is sent, which would expose the
+  operator's account on a public instance. Only pass `auth=True` when upstream
+  requires it.
+- **The website's API (`mydramalist.com/v1`) is a different API** — its paths
+  only sometimes exist on `app-api`. Verify every path on the mobile API before
+  wrapping it.
 - **Logging**: library code logs only through `log` (`logging.getLogger("mdlaw")`)
   — upstream calls at INFO (WARNING for 5xx/transport errors), cache/throttle at
   DEBUG. Never log tokens or passwords. The CLI (`-v`/`-vv`) and the server
