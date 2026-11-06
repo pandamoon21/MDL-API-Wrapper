@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a live MySQL server.
 - `mdlaw serve --port 9000` was parsed as an unknown command. `serve` now
   accepts `--host`/`--port` and honours `HOST`/`PORT`.
+- SQL cache change detection never fired in practice: `get()` deleted the
+  expired row, so the next `put()` had no previous hash to compare and always
+  wrote `changed=0`. Expired rows are now kept, and rows expired for more than
+  7 days are pruned every 500 writes.
+- Library use across several `asyncio.run()` calls failed with "Event loop is
+  closed": the HTTP client and asyncio locks were bound to the first loop. Each
+  event loop now gets its own client and locks. Auth tokens and the cache stay
+  process-wide.
+- Docker: `/data` (the compose volume for the sqlite cache) is now created and
+  owned by the non-root `appuser`. Before, it was root-owned and not writable.
 
 ### Changed
 
@@ -53,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   burst of `401`s triggers a single token refresh.
 - `/cache/stats` and `/dashboard` share one stats implementation; the response
   shape is unchanged.
+- The in-memory cache is an LRU bounded by `MDL_CACHE_MAX_ENTRIES` (default
+  10000). Each distinct query/page is a new key, so it used to grow without
+  limit.
+- Route parameters are validated and fail fast with `422`: `page` 1–1000,
+  `limit` 1–100, ids ≥ 1, `q` 1–200 characters. The 200-character cap also
+  keeps cache keys within the MySQL key column.
 - The CLI help no longer says the server defaults to `httpx`.
 
 ### Added
@@ -61,8 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MDL_TRUST_PROXY=1` to read the client IP behind Fly or another proxy.
 - `.github/workflows/ci.yml` runs ruff and pytest on Python 3.10–3.13. It is
   manual only (`workflow_dispatch`) and never triggers on its own.
-- 26 new offline regression tests. A `conftest.py` fixture keeps tests away
+- 32 new offline regression tests. A `conftest.py` fixture keeps tests away
   from the real `~/.mdlaw_auth.json`.
+- `pyproject.toml`: `dev` extra (`pip install -e .[dev]`), project URLs, and
+  ruff config.
 
 ## [1.6.2] - 2026-09-02
 

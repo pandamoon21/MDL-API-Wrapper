@@ -14,7 +14,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY mdlaw.py .
 
 # non-root user (production hygiene)
-RUN useradd --create-home --uid 10001 appuser
+# /data: volume mount point for the sqlite cache (docker-compose). Without it,
+# Docker creates the mount root-owned and appuser can't write the DB.
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /data && chown appuser:appuser /data
 USER appuser
 
 EXPOSE 8000

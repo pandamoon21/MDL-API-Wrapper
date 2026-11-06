@@ -136,11 +136,13 @@ def test_concurrent_misses_share_one_upstream_call(monkeypatch):
     c = use(monkeypatch, FakeClient(resp(data=[{"id": 1}])))
 
     async def burst():
-        return await asyncio.gather(*(mdlaw.fetch("GET", "/genres", ttl=60) for _ in range(4)))
-    results = run(burst())
+        out = await asyncio.gather(*(mdlaw.fetch("GET", "/genres", ttl=60) for _ in range(4)))
+        await asyncio.sleep(0)  # let the done-callback clear the in-flight entry
+        return out, dict(mdlaw._state().inflight)
+    results, inflight = run(burst())
     assert len(c.calls) == 1
     assert all(r == [{"id": 1}] for r in results)
-    assert mdlaw._inflight == {}
+    assert inflight == {}
 
 
 # --- query-string encoding ------------------------------------------------
@@ -280,6 +282,8 @@ def test_mysql_sql_quotes_reserved_key(monkeypatch):
     executed = []
 
     class Cur:
+        rowcount = 0
+
         def execute(self, sql, params=()):
             executed.append(sql)
 
@@ -319,3 +323,98 @@ def test_serve_args(monkeypatch):
     for bad in (["--port"], ["--port", "x"], ["--port", "70000"], ["--bogus"]):
         with pytest.raises(ValueError):
             mdlaw._parse_serve_args(bad)
+
+
+# --- round 2: change detection, bounded cache, event loops, validation ----
+
+def test_sql_change_detection_through_fetch(monkeypatch):
+    """Real flow: entry expires, fetch() misses, upstream returns a new value
+    → changed=1. get() used to delete the expired row, so this was always 0."""
+    sc = mdlaw.SQLCache("sqlite:///:memory:")
+    monkeypatch.setattr(mdlaw, "cache", sc)
+    use(monkeypatch, FakeClient(resp(data={"v": 1})))
+    run(mdlaw.fetch("GET", "/genres", ttl=-1))           # stored already expired
+    use(monkeypatch, FakeClient(resp(data={"v": 2})))
+    assert run(mdlaw.fetch("GET", "/genres", ttl=60)) == {"v": 2}
+
+    def changed():
+        cur = sc._cursor()
+        cur.execute("SELECT changed FROM mdlaw_cache WHERE key = 'GET /genres'")
+        v = cur.fetchone()[0]
+        cur.close()
+        return v
+    assert changed() == 1
+    sc.put("GET /genres", {"v": 2}, -1)                  # same value again
+    assert changed() == 0
+
+
+def test_sql_prune_removes_only_long_expired_rows():
+    sc = mdlaw.SQLCache("sqlite:///:memory:")
+    sc.put("live", 3, 60)          # first put also runs an (empty) prune
+    sc.put("old", 1, -(sc.PRUNE_AFTER + 10))
+    sc.put("recent", 2, -10)       # expired, but kept for change detection
+    assert sc.prune() == 1
+    assert sc.entries() == 2
+    assert sc.get("old") is None and sc.get("live") == 3
+
+
+def test_memory_cache_is_bounded_lru():
+    c = mdlaw.TTLCache(max_entries=3)
+    for k in "abc":
+        c.put(k, k, 60)
+    assert c.get("a") == "a"        # touch a → b is now least recently used
+    c.put("d", "d", 60)
+    assert c.entries() == 3
+    assert c.get("b") is None and c.get("a") == "a" and c.get("d") == "d"
+
+
+def test_memory_cache_max_from_env(monkeypatch):
+    monkeypatch.setenv("MDL_CACHE_MAX_ENTRIES", "7")
+    assert mdlaw.TTLCache().max_entries == 7
+
+
+def test_library_survives_multiple_asyncio_runs(monkeypatch):
+    """asyncio.run() twice used to fail with 'Event loop is closed' because the
+    client and locks were bound to the first loop."""
+    clients = []
+
+    def factory():
+        st = mdlaw._state()
+        if st.httpx is None:
+            st.httpx = FakeClient(resp(data={"ok": 1}))
+            clients.append(st.httpx)
+        return st.httpx
+    monkeypatch.setattr(mdlaw, "get_client", factory)
+
+    async def once(i):
+        # contend on the locks so they actually bind to this loop
+        return await asyncio.gather(*(mdlaw.fetch("GET", f"/x{i}/{j}", ttl=60)
+                                      for j in range(3)))
+    assert run(once(1)) == [{"ok": 1}] * 3
+    assert run(once(2)) == [{"ok": 1}] * 3
+    assert len(clients) == 2  # one client per loop
+
+
+def test_route_param_validation(monkeypatch):
+    called = []
+
+    async def fake_fetch(*a, **k):
+        called.append(a)
+        return {}
+    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    with TestClient(mdlaw.app) as cl:
+        bad = [
+            cl.get("/api/v1/titles/trending?page=0"),
+            cl.get("/api/v1/lists/featured?limit=1000"),
+            cl.get("/api/v1/people/0"),
+            cl.get("/api/v1/tags/search?q=" + "x" * 201),
+            cl.post("/api/v1/search?q="),
+        ]
+        ok = [
+            cl.get("/api/v1/titles/trending?page=2"),
+            cl.get("/api/v1/people/12"),
+            cl.post("/api/v1/search?q=crash"),
+        ]
+    assert [r.status_code for r in bad] == [422] * 5
+    assert [r.status_code for r in ok] == [200] * 3
+    assert len(called) == 3

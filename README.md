@@ -570,6 +570,7 @@ curl http://localhost:8000/api/v1/cache/stats
 ```
 
 > **Note:** change detection is only meaningful for a persistent backend (sqlite/mysql/postgres). In-memory cache resets on restart, so nothing to compare against.
+> Expired rows are kept so the next fetch can be compared against them; rows expired for more than 7 days are pruned automatically.
 
 ---
 
@@ -585,6 +586,7 @@ Everything `mdlaw` needs is set via environment variables. Here's the full pictu
 | `MDL_PASSWORD` | No | Password for the account above (paired with `MDL_USERNAME`) | disabled |
 | `MDL_CACHE_BACKEND` | No | `memory` · `sqlite` · `mysql` · `postgres` | `memory` |
 | `MDL_CACHE_DB_URL` | Only if backend ≠ memory | DSN, e.g. `sqlite:///mdlaw_cache.db` | — |
+| `MDL_CACHE_MAX_ENTRIES` | No | Max entries in the in-memory cache (LRU eviction) | `10000` |
 | `MDL_ADMIN_TOKEN` | No | Enables `POST /api/v1/auth/{login,refresh}` (send as `X-Admin-Token`); unset → those routes 404 | disabled |
 | `MDL_RATE_LIMIT` | No | Max requests/minute per client IP on `/api/v1/*` (health exempt); `0` = off | `0` |
 | `MDL_TRUST_PROXY` | No | `1` → client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind your own proxy) | off |

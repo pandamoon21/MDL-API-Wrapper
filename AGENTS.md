@@ -39,14 +39,14 @@ curl http://localhost:8000/api/v1/genres
 python3 mdlaw.py self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 47 passed
+python3 -m pytest tests/ -q      # expect: 53 passed
 ```
 
 ## Project layout
 
 ```
 mdlaw.py            # the entire API (config, client, cache, auth, routes)
-tests/              # 47 offline checks (no network); conftest.py isolates state
+tests/              # 53 offline checks (no network); conftest.py isolates state
 .github/workflows/  # docker.yml (GHCR on tags), ci.yml (ruff + pytest, manual only)
 api/index.py        # Vercel serverless entrypoint
 vercel.json         # Vercel config
@@ -66,6 +66,7 @@ pytest.ini          # pythonpath = .
 | `MDL_USERNAME` + `MDL_PASSWORD` | Enable auth-gated endpoints (title detail, search, watchlist, /me) | no | disabled |
 | `MDL_CACHE_BACKEND` | `memory` \| `sqlite` \| `mysql` \| `postgres` | no | `memory` |
 | `MDL_CACHE_DB_URL` | DSN for SQL backends, e.g. `sqlite:///mdlaw_cache.db` | only if backend ≠ memory | — |
+| `MDL_CACHE_MAX_ENTRIES` | In-memory cache size (LRU) | no | `10000` |
 | `MDL_ADMIN_TOKEN` | Enables `POST /api/v1/auth/{login,refresh}` via `X-Admin-Token` | no | routes 404 |
 | `MDL_RATE_LIMIT` | Requests/minute per client IP on `/api/v1/*` (health exempt) | no | `0` (off) |
 | `MDL_TRUST_PROXY` | `1` → client IP from `Fly-Client-IP`/`X-Forwarded-For` | no | off |
@@ -128,8 +129,16 @@ import time (no dotenv loader — set them in the shell or a process manager).
   Don't call `get_client().request()` directly.
 - **Query strings**: build them with `_qs(path, **params)` so user input is
   URL-encoded (and the cache key can't be split).
-- **`_auth_lock` is not reentrant**: code that already holds it calls
-  `_login_locked()`, never `login()`.
+- **Per-event-loop state**: locks, the HTTP client and in-flight tasks live
+  in `_state()` (one per running loop), so library users can call
+  `asyncio.run()` repeatedly. Don't add module-level asyncio primitives or
+  clients; add a field to `_LoopState` instead.
+- **The auth lock is not reentrant**: code that already holds
+  `_state().auth_lock` calls `_login_locked()`, never `login()`.
+- **Route params**: reuse the `Page`/`Limit`/`SearchQ`/`PosId` `Annotated`
+  aliases (never share a `Query()`/`Path()` instance between routes).
+- **SQL cache keeps expired rows** — change detection compares against them.
+  `SQLCache.prune()` drops rows expired > 7 days.
 - **Never return `_auth` from a route** — it holds the access/refresh tokens.
 - **CLI session**: `mdlaw auth` saves to `~/.mdlaw_auth.json` (chmod 600);
   `MDL()` and later CLI calls auto-load it. Only the CLI (or a process that

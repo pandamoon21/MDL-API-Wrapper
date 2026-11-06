@@ -20,11 +20,13 @@ import sys
 import threading
 import time
 import uuid
+import weakref
+from collections import OrderedDict
 from urllib.parse import urlencode
 
 import httpx
-from typing import Any
-from fastapi import FastAPI, Header, HTTPException, Request
+from typing import Annotated, Any
+from fastapi import FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
@@ -116,9 +118,23 @@ class CacheBackend:
         }
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer") from None
+
+
 class TTLCache(CacheBackend):
-    def __init__(self) -> None:
-        self._d: dict[str, tuple[float, object]] = {}
+    """In-memory TTL cache with LRU eviction. Bounded by ``max_entries``
+    (MDL_CACHE_MAX_ENTRIES, default 10000): every distinct query/page is a new
+    key, so an unbounded dict grows forever on a public server."""
+
+    def __init__(self, max_entries: int | None = None) -> None:
+        self._d: OrderedDict[str, tuple[float, object]] = OrderedDict()
+        self.max_entries = max(1, max_entries if max_entries is not None
+                               else _env_int("MDL_CACHE_MAX_ENTRIES", 10_000))
 
     def get(self, key: str) -> object | None:
         item = self._d.get(key)
@@ -130,11 +146,15 @@ class TTLCache(CacheBackend):
             self._d.pop(key, None)
             self.misses += 1
             return None
+        self._d.move_to_end(key)
         self.hits += 1
         return value
 
     def put(self, key: str, value: object, ttl: float) -> None:
         self._d[key] = (time.monotonic() + ttl, value)
+        self._d.move_to_end(key)
+        while len(self._d) > self.max_entries:
+            self._d.popitem(last=False)  # least recently used
 
     def entries(self) -> int:
         return len(self._d)
@@ -182,6 +202,7 @@ class SQLCache(CacheBackend):
         self.label = self._flavor
         self._ph = "%s" if self._flavor != "sqlite" else "?"
         self._k = "`key`" if self._flavor == "mysql" else "key"
+        self._puts = 0
         # One connection shared across worker threads (fetch() runs cache ops
         # via asyncio.to_thread) — serialize access.
         self._lock = threading.RLock()
@@ -245,17 +266,29 @@ class SQLCache(CacheBackend):
                 return None
             value, expires = row
             if expires <= time.time():
-                self._delete(key)
+                # Expired = miss, but keep the row: put() compares the new
+                # response's hash against it to set `changed`. Deleting it
+                # here made change detection always report changed=0.
                 self.misses += 1
                 return None
             self.hits += 1
             return json.loads(value)
 
-    def _delete(self, key: str) -> None:
-        cur = self._cursor()
-        cur.execute(f"DELETE FROM mdlaw_cache WHERE {self._k} = {self._ph}", (key,))
-        self._conn.commit()
-        cur.close()
+    # Rows expired longer than this are pruned (they're only kept for change
+    # detection, which needs the previous value right after expiry).
+    PRUNE_AFTER = 7 * 86400
+    PRUNE_EVERY = 500  # puts between prunes
+
+    def prune(self) -> int:
+        """Delete rows that expired more than PRUNE_AFTER seconds ago."""
+        with self._lock:
+            cur = self._cursor()
+            cur.execute(f"DELETE FROM mdlaw_cache WHERE expires_at < {self._ph}",
+                        (time.time() - self.PRUNE_AFTER,))
+            n = cur.rowcount
+            self._conn.commit()
+            cur.close()
+            return n
 
     def put(self, key: str, value: object, ttl: float) -> None:
         h = _json_hash(value)
@@ -289,6 +322,9 @@ class SQLCache(CacheBackend):
             cur.execute(sql, (key, value_json, expires, h, created, updated, changed))
             self._conn.commit()
             cur.close()
+            self._puts += 1
+            if self._puts % self.PRUNE_EVERY == 1:
+                self.prune()
 
     def entries(self) -> int:
         with self._lock:
@@ -328,23 +364,46 @@ async def _cache_call(fn, *args):
 # Upstream client
 # ---------------------------------------------------------------------------
 # Outbound throttle: WAF rate-limits bursts (validated: rapid probes -> soft 404).
-_SEM = asyncio.Semaphore(2)
+MAX_CONCURRENCY = 2  # parallel upstream requests
+MIN_INTERVAL = 0.5   # seconds between upstream requests
 _last_out = 0.0
-_out_lock = asyncio.Lock()
-MIN_INTERVAL = 0.5  # seconds between upstream requests
+
+
+class _LoopState:
+    """Everything bound to an event loop: asyncio locks, the HTTP client and
+    in-flight tasks. Library code may run several loops over its lifetime
+    (each asyncio.run() makes a new one) — reusing a client or lock from a
+    finished loop fails with "Event loop is closed", so each loop gets its
+    own set. Auth tokens and the cache stay process-wide."""
+
+    def __init__(self) -> None:
+        self.sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        self.out_lock = asyncio.Lock()
+        self.auth_lock = asyncio.Lock()
+        self.httpx: httpx.AsyncClient | None = None
+        self.cffi: Any | None = None
+        self.inflight: dict[str, asyncio.Task] = {}
+
+
+_loop_states: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _state() -> _LoopState:
+    """State for the running event loop (created on first use)."""
+    loop = asyncio.get_running_loop()
+    st = _loop_states.get(loop)
+    if st is None:
+        st = _loop_states[loop] = _LoopState()
+    return st
 
 
 async def _throttle() -> None:
     global _last_out
-    async with _out_lock:
+    async with _state().out_lock:
         wait = MIN_INTERVAL - (time.monotonic() - _last_out)
         if wait > 0:
             await asyncio.sleep(wait)
         _last_out = time.monotonic()
-
-
-_client: httpx.AsyncClient | None = None
-_cffi: Any | None = None
 
 
 def _url(path: str) -> str:
@@ -355,12 +414,13 @@ def _url(path: str) -> str:
 
 
 def get_client() -> httpx.AsyncClient | Any:
-    """Return the shared upstream client. Default transport is curl_cffi
-    (browser/mobile TLS impersonation — passes Cloudflare's JA3/JA4 challenge
-    from flagged IPs). Set MDL_TRANSPORT=httpx to use a plain httpx TLS stack."""
-    global _client, _cffi
+    """Return the running loop's upstream client. Default transport is
+    curl_cffi (browser/mobile TLS impersonation — passes Cloudflare's JA3/JA4
+    challenge from flagged IPs). Set MDL_TRANSPORT=httpx to use a plain httpx
+    TLS stack. Must be called from inside a running event loop."""
+    st = _state()
     if TRANSPORT == "curl_cffi":
-        if _cffi is None:
+        if st.cffi is None:
             try:
                 from curl_cffi.requests import AsyncSession
             except ImportError:
@@ -368,29 +428,32 @@ def get_client() -> httpx.AsyncClient | Any:
                     "MDL_TRANSPORT=curl_cffi (the default) requires the curl_cffi "
                     "package: pip install curl_cffi  (or set MDL_TRANSPORT=httpx)"
                 ) from None
-            _cffi = AsyncSession(impersonate="safari_ios", headers=default_headers())
-        return _cffi
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
+            st.cffi = AsyncSession(impersonate="safari_ios", headers=default_headers())
+        return st.cffi
+    if st.httpx is None or st.httpx.is_closed:
+        st.httpx = httpx.AsyncClient(
             base_url=API_BASE,
             headers=default_headers(),
             timeout=20.0,
             limits=httpx.Limits(max_keepalive_connections=10),
         )
-    return _client
+    return st.httpx
 
 
 async def close_client() -> None:
-    """Close the shared upstream client (httpx or curl_cffi session)."""
-    global _client, _cffi
-    if _cffi is not None:
+    """Close the running loop's upstream client(s) (httpx and/or curl_cffi)."""
+    st = _loop_states.get(asyncio.get_running_loop())
+    if st is None:
+        return
+    if st.cffi is not None:
         try:
-            await _cffi.close()
+            await st.cffi.close()
         except Exception:
             pass
-        _cffi = None
-    if _client is not None and not _client.is_closed:
-        await _client.aclose()
+        st.cffi = None
+    if st.httpx is not None and not st.httpx.is_closed:
+        await st.httpx.aclose()
+    st.httpx = None
 
 
 @asynccontextmanager
@@ -426,7 +489,7 @@ async def _send(method: str, path: str, headers: dict | None = None,
                 body: dict | None = None) -> Any:
     """One throttled upstream request. Transport failures become 502/504;
     the HTTP status is left for _parse() to judge."""
-    async with _SEM:
+    async with _state().sem:
         await _throttle()
         try:
             return await get_client().request(method, _url(path), headers=headers, json=body)
@@ -459,11 +522,6 @@ def _parse(r: Any) -> object:
                                   "detail": "upstream returned a non-JSON response"}) from None
 
 
-# In-flight upstream calls by cache key: concurrent misses for the same key
-# share one upstream request instead of each queueing behind the throttle.
-_inflight: dict[str, asyncio.Task] = {}
-
-
 async def fetch(method: str, path: str, ttl: float,
                 body: dict | None = None,
                 cache_key: str | None = None,
@@ -480,14 +538,17 @@ async def fetch(method: str, path: str, ttl: float,
         raise HTTPException(400, {"error": True, "code": 400,
                                   "detail": "this endpoint requires MDL_USERNAME and "
                                             "MDL_PASSWORD env vars"})
-    task = _inflight.get(key)
+    # Concurrent misses for the same key share one upstream request instead of
+    # each queueing behind the throttle.
+    inflight = _state().inflight
+    task = inflight.get(key)
     if task is None:
         task = asyncio.ensure_future(_fetch_upstream(method, path, ttl, body, key, auth))
-        _inflight[key] = task
+        inflight[key] = task
 
         def _done(t: asyncio.Task, k: str = key) -> None:
-            if _inflight.get(k) is t:
-                del _inflight[k]
+            if inflight.get(k) is t:
+                del inflight[k]
         task.add_done_callback(_done)
     # shield: one caller disconnecting must not cancel the shared request
     return await asyncio.shield(task)
@@ -547,7 +608,6 @@ _auth = {
     "last_refresh": None,
     "refreshes": 0,
 }
-_auth_lock = asyncio.Lock()
 _ANY = object()  # refresh() sentinel: refresh unconditionally
 
 
@@ -577,7 +637,7 @@ async def _auth_request(method: str, path: str, body: dict | None = None,
 
 async def login(force: bool = False) -> dict:
     """Login with configured credentials. Cached until forced or token expires."""
-    async with _auth_lock:
+    async with _state().auth_lock:
         if (not force and _auth["token"]
                 and _auth["expires_at"] > time.time()):
             return _auth
@@ -585,7 +645,7 @@ async def login(force: bool = False) -> dict:
 
 
 async def _login_locked() -> dict:
-    """Login body; caller must hold _auth_lock (asyncio.Lock is not
+    """Login body; caller must hold _state().auth_lock (asyncio.Lock is not
     reentrant, so refresh() calls this instead of login())."""
     if not _has_credentials():
         if _auth["token"] or _auth["refresh_token"]:
@@ -652,7 +712,7 @@ async def refresh(stale_token: object = _ANY) -> dict:
     already replaced it while we waited for the lock, nothing is done — so a
     burst of concurrent 401s triggers one refresh, not one each.
     """
-    async with _auth_lock:
+    async with _state().auth_lock:
         if (stale_token is not _ANY and _auth["token"]
                 and _auth["token"] != stale_token
                 and _auth["expires_at"] > time.time() + 60):
@@ -762,6 +822,15 @@ app = FastAPI(
 )
 
 _START = time.time()
+
+# Shared parameter validation: bad input fails fast with 422 instead of
+# reaching the upstream (and its throttle). QUERY's max_length also keeps
+# cache keys within the MySQL backend's VARCHAR(768) key column.
+# (Annotated aliases: a shared Query()/Path() instance gets mutated per route.)
+Page = Annotated[int, Query(ge=1, le=1000)]
+Limit = Annotated[int, Query(ge=1, le=100)]
+SearchQ = Annotated[str, Query(min_length=1, max_length=200)]
+PosId = Annotated[int, Path(ge=1)]
 
 # Inbound protection (all optional, off by default):
 #   MDL_ADMIN_TOKEN  — enables POST /api/v1/auth/{login,refresh}; callers must
@@ -923,53 +992,53 @@ async def languages() -> JSONResponse:
 
 
 @app.get("/api/v1/titles/trending")
-async def titles_trending(page: int = 1) -> JSONResponse:
+async def titles_trending(page: Page = 1) -> JSONResponse:
     """Trending titles (requires auth)."""
     return _resp(await fetch("GET", f"/titles/trending?page={page}", ttl=600, auth=True), 600)
 
 
 @app.get("/api/v1/titles/top_airing")
-async def titles_top_airing(page: int = 1) -> JSONResponse:
+async def titles_top_airing(page: Page = 1) -> JSONResponse:
     """Top airing titles (requires auth)."""
     return _resp(await fetch("GET", f"/titles/top_airing?page={page}", ttl=600, auth=True), 600)
 
 
 @app.get("/api/v1/titles/upcoming")
-async def titles_upcoming(page: int = 1) -> JSONResponse:
+async def titles_upcoming(page: Page = 1) -> JSONResponse:
     """Upcoming titles (requires auth)."""
     return _resp(await fetch("GET", f"/titles/upcoming?page={page}", ttl=600, auth=True), 600)
 
 
 @app.get("/api/v1/titles/currently_watching")
-async def titles_currently_watching(page: int = 1) -> JSONResponse:
+async def titles_currently_watching(page: Page = 1) -> JSONResponse:
     """Titles the community is currently watching (requires auth)."""
     return _resp(await fetch("GET", f"/titles/currently_watching?page={page}", ttl=600, auth=True), 600)
 
 
 @app.get("/api/v1/titles/top_movies")
-async def titles_top_movies(page: int = 1) -> JSONResponse:
+async def titles_top_movies(page: Page = 1) -> JSONResponse:
     """Top movies (requires auth)."""
     return _resp(await fetch("GET", f"/titles/top_movies?page={page}", ttl=600, auth=True), 600)
 
 
 @app.get("/api/v1/titles/{tid}/reviews")
-async def title_reviews(tid: int) -> JSONResponse:
+async def title_reviews(tid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/reviews", ttl=300), 300)
 
 
 @app.get("/api/v1/titles/{tid}")
-async def title_detail(tid: int) -> JSONResponse:
+async def title_detail(tid: PosId) -> JSONResponse:
     """Title detail — requires auth (upstream 400s without a token)."""
     return _resp(await fetch("GET", f"/titles/{tid}?expand=1", ttl=300, auth=True), 300)
 
 
 @app.get("/api/v1/titles/{tid}/recommendations")
-async def title_recommendations(tid: int) -> JSONResponse:
+async def title_recommendations(tid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/recommendations", ttl=600, auth=True), 600)
 
 
 @app.post("/api/v1/search")
-async def search(q: str, page: int = 1) -> JSONResponse:
+async def search(q: SearchQ, page: Page = 1) -> JSONResponse:
     """Search titles by keyword (POST /search/titles?edge=1&q=...&page=...)."""
     if not q.strip():
         raise HTTPException(400, {"error": True, "code": 400,
@@ -980,7 +1049,7 @@ async def search(q: str, page: int = 1) -> JSONResponse:
 
 
 @app.post("/api/v1/search/people")
-async def search_people(q: str, page: int = 1) -> JSONResponse:
+async def search_people(q: SearchQ, page: Page = 1) -> JSONResponse:
     """Search people by name (POST /search/people?q=...&page=...)."""
     if not q.strip():
         raise HTTPException(400, {"error": True, "code": 400,
@@ -1013,12 +1082,12 @@ async def me() -> JSONResponse:
 
 
 @app.get("/api/v1/titles/{tid}/comments")
-async def title_comments(tid: int) -> JSONResponse:
+async def title_comments(tid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/comments", ttl=300), 300)
 
 
 @app.get("/api/v1/titles/{tid}/credits")
-async def title_credits(tid: int) -> JSONResponse:
+async def title_credits(tid: PosId) -> JSONResponse:
     # Auth-gated upstream (400 without token); same clear error as other
     # auth-gated endpoints.
     return _resp(await fetch("GET", f"/titles/{tid}/credits", ttl=300, auth=True), 300)
@@ -1030,17 +1099,17 @@ async def calendar() -> JSONResponse:
 
 
 @app.get("/api/v1/articles/featured")
-async def articles_featured(page: int = 1) -> JSONResponse:
+async def articles_featured(page: Page = 1) -> JSONResponse:
     return _resp(await fetch("GET", f"/articles/featured?page={page}", ttl=600), 600)
 
 
 @app.get("/api/v1/lists/featured")
-async def lists_featured(limit: int = 5) -> JSONResponse:
+async def lists_featured(limit: Limit = 5) -> JSONResponse:
     return _resp(await fetch("GET", f"/lists/featured?limit={limit}", ttl=600), 600)
 
 
 @app.get("/api/v1/lists/popular")
-async def lists_popular(limit: int = 5) -> JSONResponse:
+async def lists_popular(limit: Limit = 5) -> JSONResponse:
     return _resp(await fetch("GET", f"/lists/popular_voting_lists?limit={limit}", ttl=600), 600)
 
 
@@ -1053,30 +1122,30 @@ async def leaderboard(period: str = "alltime") -> JSONResponse:
 
 
 @app.get("/api/v1/people/{pid}")
-async def people(pid: int) -> JSONResponse:
+async def people(pid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/people/{pid}", ttl=86400), 86400)
 
 
 @app.get("/api/v1/people/{pid}/credits")
-async def people_credits(pid: int) -> JSONResponse:
+async def people_credits(pid: PosId) -> JSONResponse:
     """Filmography (cast/crew) for a person/actor."""
     return _resp(await fetch("GET", f"/people/{pid}/credits", ttl=86400), 86400)
 
 
 @app.get("/api/v1/users/{uid}")
-async def user(uid: int) -> JSONResponse:
+async def user(uid: PosId) -> JSONResponse:
     """Public user profile by id."""
     return _resp(await fetch("GET", f"/users/{uid}", ttl=600), 600)
 
 
 @app.get("/api/v1/users/{uid}/stats")
-async def user_stats(uid: int) -> JSONResponse:
+async def user_stats(uid: PosId) -> JSONResponse:
     """Public user stats (collected/rated counts, distribution)."""
     return _resp(await fetch("GET", f"/users/{uid}/stats", ttl=600), 600)
 
 
 @app.get("/api/v1/tags/search")
-async def search_tags(q: str) -> JSONResponse:
+async def search_tags(q: SearchQ) -> JSONResponse:
     """Search drama tags (e.g. q=romance → Romance, Bromance, …)."""
     return _resp(await fetch("GET", _qs("/tags/search", q=q), ttl=600), 600)
 
