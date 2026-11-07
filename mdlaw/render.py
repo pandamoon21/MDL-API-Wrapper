@@ -133,7 +133,14 @@ def _mdl_url(slug: object) -> str | None:
 
 def _rank(v: object) -> str | None:
     """'#11,994'; MDL uses 99999 for 'not ranked'."""
-    return f"#{v:,}" if isinstance(v, int) and 0 < v < 99999 else None
+    return f"#{v:,}" if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 99999 else None
+
+
+def _date(v: object) -> str:
+    """'2019-04-01' from an ISO string or epoch seconds (UTC); '' if missing."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return time.strftime("%Y-%m-%d", time.gmtime(v)) if v > 0 else ""
+    return str(v or "")[:10]
 
 
 def _year(d: dict) -> str:
@@ -172,7 +179,7 @@ def _render_calendar(data: object, args) -> list[str]:
     items = sorted((i for i in _items(data) if isinstance(i, dict)
                     and start <= (i.get("released_at") or 0) < end),
                    key=lambda i: (i["released_at"],
-                                  str((rels.get(i.get("rid")) or {}).get("title") or ""),
+                                  str((rels.get(i.get("rid")) or {}).get("title") or i.get("permalink") or ""),
                                   i.get("episode_number") or 0))
     if not items:
         return [f"Nothing scheduled in the next {args.days} day(s)."]
@@ -185,7 +192,9 @@ def _render_calendar(data: object, args) -> list[str]:
             if out:
                 out.append("")
             out.append(time.strftime("%A %d %B %Y", lt))
-        rel = rels.get(it.get("rid")) or rels.get(it.get("id")) or {}
+        # Only ``rid`` points at the show; an episode's own ``id`` is unrelated,
+        # so a missing rid falls back to the permalink, never to rels[id].
+        rel = rels.get(it.get("rid")) or {}
         ep = it.get("episode_number")
         what = f"ep {ep}" if ep else (rel.get("type") or "")
         line = f"  {time.strftime('%H:%M', lt)}  {_fit(_clean(rel.get('title') or it.get('permalink')), 40)}" \
@@ -257,7 +266,8 @@ def _render_recommendations(data: object, args) -> list[str]:
         if reason:
             out += textwrap.wrap(f'"{reason}"', width, initial_indent="    ",
                                  subsequent_indent="     ")[:4]
-        who = _clean((r.get("author") or {}).get("display_name"))
+        author = r.get("author")
+        who = _clean(author.get("display_name") if isinstance(author, dict) else author)
         likes = _num(r.get("total_likes"))
         meta = " · ".join(x for x in (f"by {who}" if who else "", f"{likes} likes" if likes else "") if x)
         if meta:
@@ -375,7 +385,7 @@ def _render_profile(data: object, args) -> list[str]:
         ("Username", user if user != name else None),
         ("Location", data.get("location")),
         ("Gender", data.get("gender")),
-        ("Joined", str(data.get("joined_at") or "")[:10]),
+        ("Joined", _date(data.get("joined_at"))),
         ("Followers", _num(data.get("followers"))),
         ("Following", _num(data.get("following"))),
         ("Points", _num(data.get("points"))),
@@ -437,6 +447,7 @@ def _render_generic(data: object, args) -> list[str]:
             rows, more = _limited(rows, getattr(args, "limit", None), None)
             flex = next((n for n, (h, _) in enumerate(cols) if h == "Name"), 0)
             return _table([h for h, _ in cols], rows, flex=flex) + ([more] if more else [])
+        return [f"{len(items)} item(s) with no displayable columns — try --json"]
     if isinstance(data, dict):
         fields = [(k.replace("_", " ").capitalize(), v) for k, v in data.items()
                   if not isinstance(v, (dict, list)) and not str(v).startswith("http")]

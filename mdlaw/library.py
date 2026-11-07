@@ -2,11 +2,28 @@
 the process-wide cache, throttle, auth and transport (no server needed)."""
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import HTTPException
 
 from . import caching, client
 from ._config import _qs, log
 from .client import _auth
+
+
+def _seg(value: object) -> str:
+    """One URL path segment from a caller-supplied id or username, escaped so
+    input like ``"../titles/1"`` can't change which upstream route is hit."""
+    text = str(value).strip()
+    if text in ("", ".", ".."):
+        raise HTTPException(400, {"error": True, "code": 400,
+                                  "detail": f"invalid id or username: {value!r}"})
+    return quote(text, safe="")
+
+
+def _cap(items: list, limit: int | None) -> list:
+    """``limit`` of None or <= 0 means no cap (same rule for every method)."""
+    return items[:limit] if limit and limit > 0 else items
 
 # ---------------------------------------------------------------------------
 # Python package layer — use mdlaw as a library without the HTTP server.
@@ -26,7 +43,10 @@ class MDL:
     def __init__(self, transport: str | None = None,
                  username: str | None = None, password: str | None = None):
         if transport:
-            client.TRANSPORT = transport
+            name = transport.strip().lower()
+            if name not in ("curl_cffi", "httpx"):
+                raise ValueError("transport must be 'curl_cffi' or 'httpx'")
+            client.TRANSPORT = name
         if username is not None or password is not None:
             client.MDL_USERNAME = (username or "").strip()
             client.MDL_PASSWORD = (password or "").strip()
@@ -64,19 +84,19 @@ class MDL:
         return await self.get(_qs("/people/leaderboard", time_period=period), ttl=600)
 
     async def people(self, pid: int) -> object:
-        return await self.get(f"/people/{pid}", ttl=86400)
+        return await self.get(f"/people/{_seg(pid)}", ttl=86400)
 
     async def people_credits(self, pid: int) -> object:
         """Filmography (cast/crew) for a person/actor."""
-        return await self.get(f"/people/{pid}/credits", ttl=86400)
+        return await self.get(f"/people/{_seg(pid)}/credits", ttl=86400)
 
     async def user(self, uid: int) -> object:
         """Public user profile by id."""
-        return await self.get(f"/users/{uid}", ttl=600)
+        return await self.get(f"/users/{_seg(uid)}", ttl=600)
 
     async def user_stats(self, uid: int) -> object:
         """Public user stats (collected/rated counts, distribution)."""
-        return await self.get(f"/users/{uid}/stats", ttl=600)
+        return await self.get(f"/users/{_seg(uid)}/stats", ttl=600)
 
     async def search_tags(self, q: str) -> object:
         """Search drama tags (e.g. q=romance → Romance, Bromance, …)."""
@@ -111,19 +131,19 @@ class MDL:
 
     async def title(self, tid: int) -> object:
         """Title detail — requires account credentials (auth-gated upstream)."""
-        return await self.get(f"/titles/{tid}?expand=1", ttl=300, auth=True)
+        return await self.get(f"/titles/{_seg(tid)}?expand=1", ttl=300, auth=True)
 
     async def title_reviews(self, tid: int) -> object:
-        return await self.get(f"/titles/{tid}/reviews", ttl=300)
+        return await self.get(f"/titles/{_seg(tid)}/reviews", ttl=300)
 
     async def title_recommendations(self, tid: int) -> object:
-        return await self.get(f"/titles/{tid}/recommendations", ttl=600, auth=True)
+        return await self.get(f"/titles/{_seg(tid)}/recommendations", ttl=600, auth=True)
 
     async def title_comments(self, tid: int) -> object:
-        return await self.get(f"/titles/{tid}/comments", ttl=300)
+        return await self.get(f"/titles/{_seg(tid)}/comments", ttl=300)
 
     async def title_credits(self, tid: int) -> object:
-        return await self.get(f"/titles/{tid}/credits", ttl=300, auth=True)
+        return await self.get(f"/titles/{_seg(tid)}/credits", ttl=300, auth=True)
 
     # --- search (POST) ---
     # Upstream search is POST /search/titles?edge=1&q=<q>&page=<page>&synopsis=1.
@@ -162,7 +182,7 @@ class MDL:
                         if (it.get("media_type") or "").lower() == media_type.lower()]
         if year:
             filtered = [it for it in filtered if it.get("year") == int(year)]
-        return filtered[:limit] if limit else filtered
+        return _cap(filtered, limit)
 
     async def browse(self, types: object = None, genres: object = None,
                      countries: object = None, released_from: int | None = None,
@@ -183,7 +203,7 @@ class MDL:
                                  released_from=released_from, sort=sort, page=page, q=q)
         return await self.post(path, {}, ttl=600, auth=True)
 
-    async def browse_by_genre(self, genre_id: int, limit: int = 10,
+    async def browse_by_genre(self, genre_id: int, limit: int | None = 10,
                               source: str = "search") -> list:
         """Titles in ``genre_id``.
 
@@ -191,15 +211,17 @@ class MDL:
         request, returns search items (no ``genres`` field). ``"trending"`` /
         ``"top_movies"`` keep the old behaviour: fetch each candidate's detail
         (one auth-gated call per title) and return the matching details.
+        ``limit`` of None or <= 0 means no cap, as in :meth:`search`.
         """
         if source == "search":
             items = await self.browse(genres=genre_id)
-            return items[:limit] if isinstance(items, list) else []
+            return _cap(items, limit) if isinstance(items, list) else []
+        pool_size = max(limit * 2, 10) if limit and limit > 0 else 10
         if source == "trending":
-            pool = await self.get(f"/titles/trending?limit={max(limit * 2, 10)}",
+            pool = await self.get(f"/titles/trending?limit={pool_size}",
                                   ttl=300, auth=True)
         elif source == "top_movies":
-            pool = await self.get(f"/titles/top_movies?limit={max(limit * 2, 10)}",
+            pool = await self.get(f"/titles/top_movies?limit={pool_size}",
                                   ttl=300, auth=True)
         else:
             raise HTTPException(400, {"error": True, "code": 400,
@@ -207,6 +229,8 @@ class MDL:
         candidates = pool if isinstance(pool, list) else (pool.get("items", []) if isinstance(pool, dict) else [])
         out: list = []
         for item in candidates:
+            if not isinstance(item, dict):
+                continue
             tid = item.get("id") or item.get("rid")
             if not tid:
                 continue
@@ -221,10 +245,10 @@ class MDL:
                 log.warning("genre_titles: skipping title %s (HTTP %s)", tid, e.status_code)
                 continue
             genres = detail.get("genres") or [] if isinstance(detail, dict) else []
-            gids = [g.get("id") for g in genres]
+            gids = [g.get("id") for g in genres if isinstance(g, dict)]
             if genre_id in gids:
                 out.append(detail)
-                if len(out) >= limit:
+                if limit and 0 < limit <= len(out):
                     break
         return out
 
@@ -246,11 +270,11 @@ class MDL:
 
     async def user_lists(self, user: int | str) -> object:
         """A user's custom lists (id or username; requires auth)."""
-        return await self.get(f"/users/{user}/lists", ttl=600, auth=True)
+        return await self.get(f"/users/{_seg(user)}/lists", ttl=600, auth=True)
 
     async def user_friends(self, user: int | str) -> object:
         """A user's friends (id or username; requires auth)."""
-        return await self.get(f"/users/{user}/friends", ttl=600, auth=True)
+        return await self.get(f"/users/{_seg(user)}/friends", ttl=600, auth=True)
 
     async def recommendations(self, page: int = 1) -> object:
         """Community recommendations: "if you liked X, watch Y", with the reason."""
@@ -258,15 +282,15 @@ class MDL:
 
     async def title_feed(self, tid: int) -> object:
         """Community activity about a title."""
-        return await self.get(f"/titles/{tid}/feed", ttl=300)
+        return await self.get(f"/titles/{_seg(tid)}/feed", ttl=300)
 
     async def people_feed(self, pid: int) -> object:
         """Community activity about a person."""
-        return await self.get(f"/people/{pid}/feed", ttl=300)
+        return await self.get(f"/people/{_seg(pid)}/feed", ttl=300)
 
     async def people_gifts(self, pid: int) -> object:
         """Flowers sent to a person: ``top`` and ``recents`` givers."""
-        return await self.get(f"/people/{pid}/gifts", ttl=600)
+        return await self.get(f"/people/{_seg(pid)}/gifts", ttl=600)
 
     async def articles_categories(self) -> object:
         return await self.get("/articles/categories", ttl=86400)
@@ -276,15 +300,15 @@ class MDL:
         return await self.get(f"/groups?page={page}", ttl=3600)
 
     async def group(self, gid: int) -> object:
-        return await self.get(f"/groups/{gid}", ttl=3600)
+        return await self.get(f"/groups/{_seg(gid)}", ttl=3600)
 
     async def review(self, rid: int) -> object:
         """A single review: ratings breakdown, text, author, title."""
-        return await self.get(f"/reviews/{rid}", ttl=3600)
+        return await self.get(f"/reviews/{_seg(rid)}", ttl=3600)
 
     async def article(self, aid: int) -> object:
         """A single article with its body text."""
-        return await self.get(f"/articles/{aid}", ttl=3600)
+        return await self.get(f"/articles/{_seg(aid)}", ttl=3600)
 
     async def search_people(self, q: str, page: int = 1) -> object:
         return await self.post(_qs("/search/people", q=q, page=page), {},

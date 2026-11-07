@@ -273,3 +273,56 @@ def test_stats_reports_shared_cache():
     mdlaw.caching.cache.get("missing")
     s = mdlaw.MDL().stats()
     assert (s["hits"], s["misses"], s["entries"]) == (1, 1, 1)
+
+
+# --- edge cases: limit, transport, path segments --------------------------
+
+@pytest.mark.parametrize("limit", [0, -1, None])
+def test_no_limit_means_no_cap_everywhere(upstream, limit):
+    """limit of 0/None/negative means "no cap" for search and browse_by_genre
+    alike (before: search returned all, browse_by_genre [], trending 1)."""
+    rows = [{"id": i} for i in range(1, 4)]
+    upstream.reply = rows
+    assert call("search", "x", limit=limit) == rows
+    assert call("browse_by_genre", 18, limit=limit) == rows
+    details = {i: {"id": i, "genres": [{"id": 5}]} for i in range(1, 4)}
+    _detail_upstream(upstream, rows, details)
+    assert call("browse_by_genre", 5, limit=limit, source="trending") == list(details.values())
+
+
+def test_browse_by_genre_skips_non_dict_candidates_and_genres(upstream):
+    pool = ["junk", None, {"id": 1}]
+    _detail_upstream(upstream, pool, {1: {"genres": ["drama", {"id": 5}]}})
+    assert call("browse_by_genre", 5, source="trending") == [{"genres": ["drama", {"id": 5}]}]
+
+
+@pytest.mark.parametrize("given, stored", [("CURL_CFFI", "curl_cffi"), (" HTTPX ", "httpx")])
+def test_constructor_normalises_transport(monkeypatch, given, stored):
+    monkeypatch.setattr(mdlaw.client, "TRANSPORT", "httpx")
+    mdlaw.MDL(transport=given)
+    assert mdlaw.client.TRANSPORT == stored
+
+
+def test_constructor_rejects_unknown_transport(monkeypatch):
+    monkeypatch.setattr(mdlaw.client, "TRANSPORT", "httpx")
+    with pytest.raises(ValueError):
+        mdlaw.MDL(transport="requests")
+    assert mdlaw.client.TRANSPORT == "httpx"
+
+
+@pytest.mark.parametrize("name, value, path", [
+    ("user_lists", "../titles/1", "/users/..%2Ftitles%2F1/lists"),
+    ("user_friends", "a b?x=1", "/users/a%20b%3Fx%3D1/friends"),
+    ("title", "1/reviews", "/titles/1%2Freviews?expand=1"),
+    ("user_lists", "alice", "/users/alice/lists"),
+])
+def test_path_segments_are_escaped(upstream, name, value, path):
+    call(name, value)
+    assert upstream.calls[-1][1] == path
+
+
+@pytest.mark.parametrize("value", ["", " ", ".", ".."])
+def test_path_segment_rejects_empty_and_dot_segments(upstream, value):
+    with pytest.raises(HTTPException) as ei:
+        call("user_lists", value)
+    assert ei.value.status_code == 400 and upstream.calls == []

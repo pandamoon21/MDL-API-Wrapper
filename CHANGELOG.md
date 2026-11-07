@@ -18,6 +18,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the `MDL` library wrappers (`library.py` 76% -> 100%) and the
   renderers are covered offline. 140 -> 384 tests.
 
+### Fixed
+
+- `MDL` library: ids and usernames are escaped as a single path segment, so
+  `user_lists("../titles/1")` can no longer reach a different upstream route.
+  Empty, `.` and `..` raise 400. (The HTTP server already validated these.)
+- `MDL` library: `limit` of `None`, `0` or a negative number now means "no
+  cap" in `search` and every `browse_by_genre` source. Before, `search`
+  returned everything, `browse_by_genre` returned `[]`, and the trending
+  source returned one title (`None` crashed).
+- `MDL(transport=...)` is lowercased like `MDL_TRANSPORT`, and an unknown
+  value raises `ValueError`. Before, `"CURL_CFFI"` silently fell back to httpx.
+- `browse_by_genre` skips non-object candidates and genres instead of raising
+  `AttributeError`.
+- CLI text output:
+  - The calendar no longer shows an unrelated show when an episode has no
+    `rid`; it falls back to the permalink.
+  - Recommendations no longer crash when `author` is not an object.
+  - Profile join dates given as epoch seconds print as a date.
+  - A list of objects with no known columns prints a `--json` hint instead of
+    Python reprs.
+  - A boolean rank is not shown as `#1`.
+
 ## [1.9.0] - 2026-11-07
 
 ### Added

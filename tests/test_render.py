@@ -453,3 +453,43 @@ def test_explain_status_codes(code, detail, expected):
 ])
 def test_explain_extracts_message_from_detail(detail, message):
     assert r._explain(HTTPException(418, detail)) == (f"{message} (HTTP 418)", None)
+
+
+# --- edge cases ------------------------------------------------------------
+
+def test_rank_rejects_bool():
+    assert r._rank(True) is None
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("2019-04-01T10:00:00Z", "2019-04-01"), (1554112800, "2019-04-01"),
+    (1554112800.5, "2019-04-01"), (0, ""), (None, ""), (True, "True")])
+def test_date(value, expected):
+    assert r._date(value) == expected
+
+
+def test_profile_joined_from_epoch():
+    out = r._render_profile({"display_name": "x", "joined_at": 1554112800}, args())
+    assert any("2019-04-01" in line for line in out)
+    assert not any("1554112800" in line for line in out)
+
+
+def test_calendar_without_rid_never_borrows_a_show_by_episode_id():
+    now = time.time()
+    data = {"items": [{"id": 2, "released_at": now + 60, "permalink": "ep-perma"}],
+            "relationships": [{"id": 2, "title": "Unrelated show"}]}
+    out = "\n".join(r._render_calendar(data, args(days=3)))
+    assert "Unrelated show" not in out and "ep-perma" in out
+
+
+@pytest.mark.parametrize("author, shown", [("fan", "by fan"), (None, None), (42, "by 42")])
+def test_recommendations_author_not_a_dict(author, shown):
+    data = [{"title": {"id": 1, "title": "A"}, "similar": {"id": 2, "title": "B"},
+             "author": author}]
+    out = r._render_recommendations(data, args())
+    assert (shown in out[2]) if shown else out[2] == ""
+
+
+def test_generic_list_of_dicts_without_known_columns_hides_repr():
+    out = r._render_generic([{"foo": 1}, {"bar": 2}], args())
+    assert out == ["2 item(s) with no displayable columns — try --json"]
