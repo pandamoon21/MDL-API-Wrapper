@@ -45,6 +45,9 @@ mdlaw = "mdlaw:main"
 [tool.setuptools]
 packages = ["mdlaw"]
 
+[tool.setuptools.package-data]
+mdlaw = ["py.typed"]
+
 [tool.setuptools.dynamic]
 version = { attr = "mdlaw._config.__version__" }
 
