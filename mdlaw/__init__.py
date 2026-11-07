@@ -9,7 +9,7 @@ Self-check:  python -m mdlaw self   (offline)
 
 Modules: _config (constants, headers, logger), caching (cache backends),
 client (upstream client, auth, browse filters), server (FastAPI app and
-routes), library (MDL), cli (command line).
+routes), library (MDL), cli (command line), render (CLI text output).
 
 Settings that change at runtime (TRANSPORT, MDL_USERNAME, MDL_PASSWORD,
 RETRIES, ...) are not re-exported here: read or set them on their module,
