@@ -43,13 +43,13 @@ def sleeps(monkeypatch):
 
     async def fake_sleep(seconds):
         waited.append(seconds)
-    monkeypatch.setattr(mdlaw, "_retry_sleep", fake_sleep)
-    monkeypatch.setattr(mdlaw, "RETRIES", 2)
+    monkeypatch.setattr(mdlaw.client, "_retry_sleep", fake_sleep)
+    monkeypatch.setattr(mdlaw.client, "RETRIES", 2)
     return waited
 
 
 def use(monkeypatch, client):
-    monkeypatch.setattr(mdlaw, "get_client", lambda: client)
+    monkeypatch.setattr(mdlaw.client, "get_client", lambda: client)
     return client
 
 
@@ -67,7 +67,7 @@ def test_transport_errors_are_retried(monkeypatch, sleeps):
 
 
 def test_gives_up_after_n_retries(monkeypatch, sleeps):
-    monkeypatch.setattr(mdlaw, "RETRIES", 3)
+    monkeypatch.setattr(mdlaw.client, "RETRIES", 3)
     c = use(monkeypatch, FakeClient(resp(502)))
     with pytest.raises(HTTPException) as ei:
         run(mdlaw.fetch("GET", "/genres", ttl=60))
@@ -75,7 +75,7 @@ def test_gives_up_after_n_retries(monkeypatch, sleeps):
     assert len(c.calls) == 4 and len(sleeps) == 3
     # exponential backoff with jitter: each delay within [base/2, base]
     for i, d in enumerate(sleeps, start=1):
-        base = mdlaw.RETRY_BASE_DELAY * 2 ** (i - 1)
+        base = mdlaw.client.RETRY_BASE_DELAY * 2 ** (i - 1)
         assert base / 2 <= d <= base
 
 
@@ -113,7 +113,7 @@ def test_no_retry_on_other_errors(monkeypatch, sleeps, status):
 
 def test_read_only_post_search_is_retried(monkeypatch, sleeps):
     c = use(monkeypatch, FakeClient(resp(503), resp(data={"ok": 1})))
-    path = mdlaw._qs("/search/titles", edge=1, q="x")
+    path = mdlaw._config._qs("/search/titles", edge=1, q="x")
     assert run(mdlaw.fetch("POST", path, ttl=60)) == {"ok": 1}
     assert len(c.calls) == 2
 
@@ -126,8 +126,8 @@ def test_no_retry_for_non_idempotent_post(monkeypatch, sleeps):
 
 
 def test_auth_calls_are_never_retried(monkeypatch, sleeps):
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "p")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "p")
     c = use(monkeypatch, FakeClient(resp(503), resp(data={"access_token": "t"})))
     with pytest.raises(HTTPException) as ei:
         run(mdlaw.login(force=True))
@@ -136,7 +136,7 @@ def test_auth_calls_are_never_retried(monkeypatch, sleeps):
 
 
 def test_retries_zero_disables(monkeypatch, sleeps):
-    monkeypatch.setattr(mdlaw, "RETRIES", 0)
+    monkeypatch.setattr(mdlaw.client, "RETRIES", 0)
     c = use(monkeypatch, FakeClient(resp(503), resp(data={"ok": 1})))
     with pytest.raises(HTTPException) as ei:
         run(mdlaw.fetch("GET", "/genres", ttl=60))
@@ -146,7 +146,7 @@ def test_retries_zero_disables(monkeypatch, sleeps):
 
 def test_401_refresh_and_retries_share_one_bound(monkeypatch, sleeps):
     """A 401 refreshes once; transient retries don't reset after it."""
-    mdlaw._auth.update(token="old", refresh_token="r", expires_at=9e9)
+    mdlaw.client._auth.update(token="old", refresh_token="r", expires_at=9e9)
     c = use(monkeypatch, FakeClient(
         resp(503),                                        # retry 1
         resp(401),                                        # -> refresh
@@ -164,7 +164,7 @@ def test_401_refresh_and_retries_share_one_bound(monkeypatch, sleeps):
 
 
 def test_401_behaviour_unchanged(monkeypatch, sleeps):
-    mdlaw._auth.update(token="old", refresh_token="r", expires_at=9e9)
+    mdlaw.client._auth.update(token="old", refresh_token="r", expires_at=9e9)
     c = use(monkeypatch, FakeClient(
         resp(401),
         resp(data={"access_token": "new", "expires_in": 3600}),
@@ -178,6 +178,6 @@ def test_retry_after_http_date():
     from email.utils import formatdate
     import time
     r = resp(429, headers={"Retry-After": formatdate(time.time() + 5, usegmt=True)})
-    assert 3 <= mdlaw._retry_after(r) <= 5
-    assert mdlaw._retry_after(resp(429, headers={"Retry-After": "soon"})) is None
-    assert mdlaw._retry_after(resp(429)) is None
+    assert 3 <= mdlaw.client._retry_after(r) <= 5
+    assert mdlaw.client._retry_after(resp(429, headers={"Retry-After": "soon"})) is None
+    assert mdlaw.client._retry_after(resp(429)) is None

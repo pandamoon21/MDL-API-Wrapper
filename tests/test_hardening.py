@@ -35,7 +35,7 @@ def resp(status=200, data=None, content=None):
 
 
 def use(monkeypatch, client):
-    monkeypatch.setattr(mdlaw, "get_client", lambda: client)
+    monkeypatch.setattr(mdlaw.client, "get_client", lambda: client)
     return client
 
 
@@ -46,8 +46,8 @@ def run(coro, timeout=3):
 # --- deadlock -------------------------------------------------------------
 
 def test_refresh_without_refresh_token_does_not_deadlock(monkeypatch):
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "p")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "p")
     c = use(monkeypatch, FakeClient(resp(data={"access_token": "new", "expires_in": 3600})))
     out = run(mdlaw.refresh())  # used to hang forever on the re-entered lock
     assert out["token"] == "new"
@@ -55,9 +55,9 @@ def test_refresh_without_refresh_token_does_not_deadlock(monkeypatch):
 
 
 def test_failed_refresh_falls_back_to_login(monkeypatch):
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "p")
-    mdlaw._auth.update(token="old", refresh_token="r")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "p")
+    mdlaw.client._auth.update(token="old", refresh_token="r")
     c = use(monkeypatch, FakeClient(
         resp(400, {"error": "invalid_grant"}),
         resp(data={"access_token": "fresh", "expires_in": 3600})))
@@ -67,14 +67,14 @@ def test_failed_refresh_falls_back_to_login(monkeypatch):
 
 
 def test_concurrent_refresh_runs_once(monkeypatch):
-    mdlaw._auth.update(token="old", refresh_token="r", expires_at=0.0)
+    mdlaw.client._auth.update(token="old", refresh_token="r", expires_at=0.0)
     c = use(monkeypatch, FakeClient(resp(data={"access_token": "new", "expires_in": 3600})))
 
     async def burst():
         await asyncio.gather(*(mdlaw.refresh(stale_token="old") for _ in range(5)))
     run(burst())
     assert len(c.calls) == 1
-    assert mdlaw._auth["token"] == "new" and mdlaw._auth["refresh_token"] == "r"
+    assert mdlaw.client._auth["token"] == "new" and mdlaw.client._auth["refresh_token"] == "r"
 
 
 # --- transport errors (curl_cffi is the default transport) ----------------
@@ -108,7 +108,7 @@ def test_upstream_status_is_propagated_and_not_cached(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         run(mdlaw.fetch("GET", "/people/1", ttl=60))
     assert ei.value.status_code == 404
-    assert mdlaw.cache.entries() == 0
+    assert mdlaw.caching.cache.entries() == 0
 
 
 def test_non_json_200_is_502(monkeypatch):
@@ -126,7 +126,7 @@ def test_non_utf8_json_is_decoded_leniently(monkeypatch):
 def test_auth_request_raises_on_error_status(monkeypatch):
     use(monkeypatch, FakeClient(resp(500, content=b"<html>oops</html>")))
     with pytest.raises(HTTPException) as ei:
-        run(mdlaw._auth_request("POST", "/auth/login", body={}))
+        run(mdlaw.client._auth_request("POST", "/auth/login", body={}))
     assert ei.value.status_code == 500
 
 
@@ -138,7 +138,7 @@ def test_concurrent_misses_share_one_upstream_call(monkeypatch):
     async def burst():
         out = await asyncio.gather(*(mdlaw.fetch("GET", "/genres", ttl=60) for _ in range(4)))
         await asyncio.sleep(0)  # let the done-callback clear the in-flight entry
-        return out, dict(mdlaw._state().inflight)
+        return out, dict(mdlaw.client._state().inflight)
     results, inflight = run(burst())
     assert len(c.calls) == 1
     assert all(r == [{"id": 1}] for r in results)
@@ -148,7 +148,7 @@ def test_concurrent_misses_share_one_upstream_call(monkeypatch):
 # --- query-string encoding ------------------------------------------------
 
 def test_qs_encodes_user_input():
-    assert mdlaw._qs("/search/titles", edge=1, q="a&page=9#x", page=1) == \
+    assert mdlaw._config._qs("/search/titles", edge=1, q="a&page=9#x", page=1) == \
         "/search/titles?edge=1&q=a%26page%3D9%23x&page=1"
 
 
@@ -158,7 +158,7 @@ def test_search_query_is_encoded(monkeypatch):
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
         calls.append(path)
         return []
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
 
     async def go():
         mdl = mdlaw.MDL()
@@ -178,14 +178,14 @@ def test_search_query_is_encoded(monkeypatch):
 def test_load_auth_does_not_inject_fake_credentials(tmp_path, monkeypatch):
     f = tmp_path / "s.json"
     f.write_text(json.dumps({"token": "t", "refresh_token": "r", "expires_at": 0}))
-    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(f))
-    assert mdlaw._load_auth() is True
-    assert mdlaw.MDL_USERNAME == "" and mdlaw.MDL_PASSWORD == ""
+    monkeypatch.setattr(mdlaw.client, "_AUTH_FILE", str(f))
+    assert mdlaw.client._load_auth() is True
+    assert mdlaw.client.MDL_USERNAME == "" and mdlaw.client.MDL_PASSWORD == ""
     assert mdlaw.auth_enabled() is True
 
 
 def test_expired_saved_session_gives_clear_error(monkeypatch):
-    mdlaw._auth.update(token="t", refresh_token="r")
+    mdlaw.client._auth.update(token="t", refresh_token="r")
     c = use(monkeypatch, FakeClient(resp(401, {"error": "invalid_grant"})))
     with pytest.raises(HTTPException) as ei:
         run(mdlaw.refresh())
@@ -194,25 +194,25 @@ def test_expired_saved_session_gives_clear_error(monkeypatch):
 
 
 def test_server_does_not_write_session_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "p")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "p")
     use(monkeypatch, FakeClient(resp(data={"access_token": "tok", "expires_in": 60})))
     run(mdlaw.login(force=True))
     assert not (tmp_path / ".mdlaw_auth.json").exists()
 
 
 def test_session_write_failure_only_warns(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(mdlaw, "_PERSIST_AUTH", True)
-    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(tmp_path / "missing-dir" / "s.json"))
+    monkeypatch.setattr(mdlaw.client, "_PERSIST_AUTH", True)
+    monkeypatch.setattr(mdlaw.client, "_AUTH_FILE", str(tmp_path / "missing-dir" / "s.json"))
     with caplog.at_level("WARNING", logger="mdlaw"):
-        mdlaw._save_auth()  # must not raise
+        mdlaw.client._save_auth()  # must not raise
     assert "could not save session" in caplog.text
 
 
 def test_cli_session_file_written(tmp_path, monkeypatch):
-    monkeypatch.setattr(mdlaw, "_PERSIST_AUTH", True)
-    mdlaw._auth.update(token="t", refresh_token="r", username="me")
-    mdlaw._save_auth()
+    monkeypatch.setattr(mdlaw.client, "_PERSIST_AUTH", True)
+    mdlaw.client._auth.update(token="t", refresh_token="r", username="me")
+    mdlaw.client._save_auth()
     data = json.loads((tmp_path / ".mdlaw_auth.json").read_text())
     assert data["token"] == "t" and data["username"] == "me"
 
@@ -220,16 +220,16 @@ def test_cli_session_file_written(tmp_path, monkeypatch):
 # --- HTTP layer: admin-gated auth routes, rate limit, stats ---------------
 
 def test_auth_routes_disabled_without_admin_token(monkeypatch):
-    monkeypatch.setattr(mdlaw, "MDL_ADMIN_TOKEN", "")
+    monkeypatch.setattr(mdlaw.server, "MDL_ADMIN_TOKEN", "")
     with TestClient(mdlaw.app) as cl:
         assert cl.post("/api/v1/auth/login").status_code == 404
         assert cl.post("/api/v1/auth/refresh").status_code == 404
 
 
 def test_auth_routes_never_return_tokens(monkeypatch):
-    monkeypatch.setattr(mdlaw, "MDL_ADMIN_TOKEN", "s3cret")
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "p")
+    monkeypatch.setattr(mdlaw.server, "MDL_ADMIN_TOKEN", "s3cret")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "p")
     use(monkeypatch, FakeClient(resp(data={"access_token": "TOKEN-XYZ",
                                            "refresh_token": "REFRESH-XYZ",
                                            "expires_in": 3600})))
@@ -243,8 +243,8 @@ def test_auth_routes_never_return_tokens(monkeypatch):
 
 
 def test_rate_limit(monkeypatch):
-    monkeypatch.setattr(mdlaw, "RATE_LIMIT", 2)
-    monkeypatch.setattr(mdlaw, "_rate", {})
+    monkeypatch.setattr(mdlaw.server, "RATE_LIMIT", 2)
+    monkeypatch.setattr(mdlaw.server, "_rate", {})
     with TestClient(mdlaw.app) as cl:
         codes = [cl.get("/api/v1/cache/stats").status_code for _ in range(3)]
         health = [cl.get("/api/v1/health").status_code for _ in range(3)]
@@ -253,7 +253,7 @@ def test_rate_limit(monkeypatch):
 
 
 def test_rate_limit_off_by_default(monkeypatch):
-    monkeypatch.setattr(mdlaw, "RATE_LIMIT", 0)
+    monkeypatch.setattr(mdlaw.server, "RATE_LIMIT", 0)
     with TestClient(mdlaw.app) as cl:
         assert all(cl.get("/api/v1/cache/stats").status_code == 200 for _ in range(5))
 
@@ -270,12 +270,12 @@ def test_cache_stats_shape():
 # --- SQL cache ------------------------------------------------------------
 
 def test_fetch_with_sqlite_cache(monkeypatch):
-    monkeypatch.setattr(mdlaw, "cache", mdlaw.SQLCache("sqlite:///:memory:"))
+    monkeypatch.setattr(mdlaw.caching, "cache", mdlaw.SQLCache("sqlite:///:memory:"))
     c = use(monkeypatch, FakeClient(resp(data={"ok": 1})))
     assert run(mdlaw.fetch("GET", "/genres", ttl=60)) == {"ok": 1}
     assert run(mdlaw.fetch("GET", "/genres", ttl=60)) == {"ok": 1}
     assert len(c.calls) == 1
-    assert mdlaw.cache.stats()["backend"] == "sqlite"
+    assert mdlaw.caching.cache.stats()["backend"] == "sqlite"
 
 
 def test_mysql_sql_quotes_reserved_key(monkeypatch):
@@ -316,14 +316,14 @@ def test_mysql_sql_quotes_reserved_key(monkeypatch):
 def test_serve_args(monkeypatch):
     monkeypatch.delenv("HOST", raising=False)
     monkeypatch.delenv("PORT", raising=False)
-    assert mdlaw._parse_serve_args([]) == ("0.0.0.0", 8000)
-    assert mdlaw._parse_serve_args(["--port", "9000"]) == ("0.0.0.0", 9000)
-    assert mdlaw._parse_serve_args(["--host=127.0.0.1", "--port=1"]) == ("127.0.0.1", 1)
+    assert mdlaw.cli._parse_serve_args([]) == ("0.0.0.0", 8000)
+    assert mdlaw.cli._parse_serve_args(["--port", "9000"]) == ("0.0.0.0", 9000)
+    assert mdlaw.cli._parse_serve_args(["--host=127.0.0.1", "--port=1"]) == ("127.0.0.1", 1)
     monkeypatch.setenv("PORT", "8080")
-    assert mdlaw._parse_serve_args([]) == ("0.0.0.0", 8080)
+    assert mdlaw.cli._parse_serve_args([]) == ("0.0.0.0", 8080)
     for bad in (["--port"], ["--port", "x"], ["--port", "70000"], ["--bogus"]):
         with pytest.raises(ValueError):
-            mdlaw._parse_serve_args(bad)
+            mdlaw.cli._parse_serve_args(bad)
 
 
 # --- round 2: change detection, bounded cache, event loops, validation ----
@@ -332,7 +332,7 @@ def test_sql_change_detection_through_fetch(monkeypatch):
     """Real flow: entry expires, fetch() misses, upstream returns a new value
     → changed=1. get() used to delete the expired row, so this was always 0."""
     sc = mdlaw.SQLCache("sqlite:///:memory:")
-    monkeypatch.setattr(mdlaw, "cache", sc)
+    monkeypatch.setattr(mdlaw.caching, "cache", sc)
     use(monkeypatch, FakeClient(resp(data={"v": 1})))
     run(mdlaw.fetch("GET", "/genres", ttl=-1))           # stored already expired
     use(monkeypatch, FakeClient(resp(data={"v": 2})))
@@ -380,12 +380,12 @@ def test_library_survives_multiple_asyncio_runs(monkeypatch):
     clients = []
 
     def factory():
-        st = mdlaw._state()
+        st = mdlaw.client._state()
         if st.httpx is None:
             st.httpx = FakeClient(resp(data={"ok": 1}))
             clients.append(st.httpx)
         return st.httpx
-    monkeypatch.setattr(mdlaw, "get_client", factory)
+    monkeypatch.setattr(mdlaw.client, "get_client", factory)
 
     async def once(i):
         # contend on the locks so they actually bind to this loop
@@ -402,7 +402,7 @@ def test_route_param_validation(monkeypatch):
     async def fake_fetch(*a, **k):
         called.append(a)
         return {}
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
     with TestClient(mdlaw.app) as cl:
         bad = [
             cl.get("/api/v1/titles/trending?page=0"),
@@ -432,7 +432,7 @@ def _capture(monkeypatch):
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None, cache_key=None):
         calls.append((method, path, auth))
         return GENRES if path == "/genres" else [{"id": 1, "title": "X"}]
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
     return calls
 
 

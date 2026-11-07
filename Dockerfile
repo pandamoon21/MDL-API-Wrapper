@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # app code
-COPY mdlaw.py .
+COPY mdlaw/ mdlaw/
 
 # non-root user (production hygiene)
 # /data: volume mount point for the sqlite cache (docker-compose). Without it,

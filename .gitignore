@@ -10,3 +10,4 @@ build/
 dist/
 *.egg-info/
 .mdlaw_auth.json
+.claude/worktrees/

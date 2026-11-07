@@ -1,8 +1,8 @@
 # mdlaw — Agent Instructions
 
-`mdlaw` is a single-file FastAPI wrapper over the official MyDramaList Android
-app API (`app-api.mydramalist.com/v1`). One Python file (`mdlaw.py`), no build
-step. This file tells an AI agent (or any new developer) how to get it running
+`mdlaw` is a FastAPI wrapper over the official MyDramaList Android
+app API (`app-api.mydramalist.com/v1`). One small Python package (`mdlaw/`),
+no build step. This file tells an AI agent (or any new developer) how to get it running
 and what to watch out for.
 
 ## Quick start (local)
@@ -36,7 +36,7 @@ curl http://localhost:8000/api/v1/health
 curl http://localhost:8000/api/v1/genres
 
 # offline self-check (no network, no server needed)
-python3 mdlaw.py self
+python3 -m mdlaw self
 
 # full test suite (offline)
 python3 -m pytest tests/ -q      # expect: 94 passed
@@ -45,7 +45,15 @@ python3 -m pytest tests/ -q      # expect: 94 passed
 ## Project layout
 
 ```
-mdlaw.py            # the entire API (config, client, cache, auth, routes)
+mdlaw/              # the package (module map below)
+  __init__.py       #   public API re-exports (app, MDL, main, fetch, cache, ...)
+  __main__.py       #   `python -m mdlaw` → cli.main()
+  _config.py        #   API_BASE, API_KEY, __version__, log, default_headers(), _qs()
+  caching.py        #   CacheBackend, TTLCache, SQLCache, `cache`, _cache_call()
+  client.py         #   transport, throttle, fetch/_send/_parse, retries, auth, browse_path()
+  server.py         #   FastAPI `app`, lifespan, rate limit/admin, OpenAPI models, routes
+  library.py        #   class MDL (async library client)
+  cli.py            #   self_check(), argparse, renderers, main()
 tests/              # 94 offline checks (no network); conftest.py isolates state
 .github/workflows/  # docker.yml (GHCR on tags), ci.yml (ruff + pytest, manual only)
 api/index.py        # Vercel serverless entrypoint
@@ -112,16 +120,26 @@ import time (no dotenv loader — set them in the shell or a process manager).
 - **Do not remove the throttle or the cache** — that's what keeps us under the
   WAF. A burst of uncached requests → soft 404s.
 - **Don't change the header scheme** unless MDL updates the app. If endpoints
-  start 403ing, the constants at the top of `mdlaw.py` are the single place to
+  start 403ing, the constants in `mdlaw/_config.py` are the single place to
   update.
-- **No API key in source**: `mdlaw.py` must never embed a fixed key or
+- **No API key in source**: `mdlaw/` must never embed a fixed key or
   obfuscation machinery. `API_KEY` comes from `MDL_API_KEY` env or a generated
   nonce — nothing to leak.
-- **Run `python3 mdlaw.py self`** before committing — it's a fast offline
+- **Run `python3 -m mdlaw self`** before committing — it's a fast offline
   sanity check (headers, cache, MD5 formula, SQL change detection).
 - **Keep tests offline** — `tests/` must never hit the network.
-- **Single-file rule** — new endpoints go in `mdlaw.py` unless there's a real
-  reason to split. Avoid adding dependencies; `fastapi` + `httpx` + `curl_cffi`
+- **Where code goes** — a new endpoint is a route in `server.py` + a method on
+  `MDL` in `library.py` (+ optionally a CLI command in `cli.py`). Upstream,
+  auth and browse logic lives in `client.py`; cache backends in `caching.py`;
+  shared constants in `_config.py`. Dependencies point one way:
+  `server`/`library`/`cli` → `client` → `caching` → `_config`, never back.
+- **Runtime-mutable globals** (`TRANSPORT`, `MDL_USERNAME`, `MDL_PASSWORD`,
+  `_PERSIST_AUTH`, `RETRIES`, ...) live in `client.py` and are read/written as
+  `client.NAME` — never `from .client import NAME` (that copies a stale value).
+  The same goes for `caching.cache`. Tests monkeypatch the owning module
+  (`monkeypatch.setattr(mdlaw.client, "fetch", ...)`); server routes and `MDL`
+  call `client.fetch(...)`, so one patch covers both.
+- **Dependencies**: avoid adding them; `fastapi` + `httpx` + `curl_cffi`
   + stdlib cover 99% of needs. Optional DB drivers (`pymysql`, `psycopg`) stay
   optional.
 - **Auth-gated endpoints** need `auth=True` in the `fetch()` call; without

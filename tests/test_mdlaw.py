@@ -14,7 +14,7 @@ def test_key_optional():
     if os.environ.get("MDL_API_KEY"):
         assert mdlaw.API_KEY == os.environ["MDL_API_KEY"].strip()
     # default transport is curl_cffi (TLS impersonation); httpx is opt-out
-    assert mdlaw.TRANSPORT in ("httpx", "curl_cffi")
+    assert mdlaw.client.TRANSPORT in ("httpx", "curl_cffi")
 
 
 def test_import_without_key_ok():
@@ -29,7 +29,9 @@ def test_import_without_key_ok():
 
 
 def test_key_not_literal_in_source():
-    src = open("mdlaw.py", encoding="utf-8").read()
+    import pathlib
+    src = "".join(p.read_text(encoding="utf-8")
+                  for p in sorted(pathlib.Path(mdlaw.__file__).parent.glob("*.py")))
     # public build: no embedded literal key, no fixed fallback — the fallback
     # is a runtime-generated nonce (secrets + string + range(20)). No blob/XOR
     # key machinery (b64decode is fine: used for JWT exp decoding in auth).
@@ -40,24 +42,24 @@ def test_key_not_literal_in_source():
 
 
 def test_md5_formula():
-    assert mdlaw._md5("secret") == "5ebe2294ecd0e0f08eab7690d2a6ee69"
+    assert mdlaw.client._md5("secret") == "5ebe2294ecd0e0f08eab7690d2a6ee69"
 
 
 def test_cloudflare_challenge_message():
     # 403 + "Just a moment..." (Cloudflare challenge) → helpful message, not raw HTML
-    e = mdlaw._upstream_error(403, "<!DOCTYPE html><html><title>Just a moment...</title></html>")
+    e = mdlaw.client._upstream_error(403, "<!DOCTYPE html><html><title>Just a moment...</title></html>")
     assert e.status_code == 403
     assert "curl_cffi" in str(e.detail)
     # non-challenge errors keep the original detail
-    e2 = mdlaw._upstream_error(404, "not found")
+    e2 = mdlaw.client._upstream_error(404, "not found")
     assert e2.status_code == 404 and "not found" in str(e2.detail)
 
 
 def test_auth_offline(monkeypatch):
     # auth reads env at import time — force it off so this test is
     # deterministic regardless of the surrounding shell environment
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "")
     assert mdlaw.auth_enabled() is False
     h = mdlaw.default_headers()
     assert "Authorization" not in h
@@ -79,14 +81,14 @@ def test_login_challenge_id_with_token_succeeds(monkeypatch):
     async def fake_auth_request(method, path, body=None, token=None):
         return {"access_token": "tok123", "expires_in": 2592000,
                 "challenge_id": "device-challenge-abc"}
-    monkeypatch.setattr(mdlaw, "_auth_request", fake_auth_request)
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u@x.com")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "pw")
-    monkeypatch.setattr(mdlaw, "_save_auth", lambda: None)
+    monkeypatch.setattr(mdlaw.client, "_auth_request", fake_auth_request)
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u@x.com")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "pw")
+    monkeypatch.setattr(mdlaw.client, "_save_auth", lambda: None)
     # reset cached auth state
-    mdlaw._auth["token"] = None
-    mdlaw._auth["refresh_token"] = None
-    mdlaw._auth["expires_at"] = 0
+    mdlaw.client._auth["token"] = None
+    mdlaw.client._auth["refresh_token"] = None
+    mdlaw.client._auth["expires_at"] = 0
 
     async def run():
         r = await mdlaw.login(force=True)
@@ -94,9 +96,9 @@ def test_login_challenge_id_with_token_succeeds(monkeypatch):
         assert r["login_error"] is None
     asyncio.run(run())
     # cleanup so other tests aren't affected
-    mdlaw._auth["token"] = None
-    mdlaw.MDL_USERNAME = ""
-    mdlaw.MDL_PASSWORD = ""
+    mdlaw.client._auth["token"] = None
+    mdlaw.client.MDL_USERNAME = ""
+    mdlaw.client.MDL_PASSWORD = ""
 
 
 def test_login_2fa_still_detected(monkeypatch):
@@ -104,9 +106,9 @@ def test_login_2fa_still_detected(monkeypatch):
     async def fake_auth_request(method, path, body=None, token=None):
         return {"code": 428, "message": "2fa required",
                 "requires_2fa": True}
-    monkeypatch.setattr(mdlaw, "_auth_request", fake_auth_request)
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "u@x.com")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "pw")
+    monkeypatch.setattr(mdlaw.client, "_auth_request", fake_auth_request)
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "u@x.com")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "pw")
 
     async def run():
         try:
@@ -115,8 +117,8 @@ def test_login_2fa_still_detected(monkeypatch):
         except Exception as e:
             assert getattr(e, "status_code", None) == 428
     asyncio.run(run())
-    mdlaw.MDL_USERNAME = ""
-    mdlaw.MDL_PASSWORD = ""
+    mdlaw.client.MDL_USERNAME = ""
+    mdlaw.client.MDL_PASSWORD = ""
 
 
 def test_ttl_cache():
@@ -137,7 +139,7 @@ def test_leaderboard_validation():
     from fastapi import HTTPException
     import pytest
     with pytest.raises(HTTPException):
-        asyncio.run(mdlaw.leaderboard(period="bogus"))
+        asyncio.run(mdlaw.server.leaderboard(period="bogus"))
 
 
 def test_sql_cache_change_detection():
@@ -165,7 +167,7 @@ def test_mdl_library_layer(monkeypatch):
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
         calls.append((method, path, ttl, auth, body))
         return {"ok": True}
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
 
     async def run():
         mdl = mdlaw.MDL()
@@ -198,7 +200,7 @@ def test_mdl_new_endpoints(monkeypatch):
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
         calls.append((method, path, ttl, auth, body))
         return {"ok": True}
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
 
     async def run():
         mdl = mdlaw.MDL()
@@ -224,12 +226,12 @@ def test_mdl_constructor_auth(monkeypatch):
     # MDL(username=..., password=...) sets the module-level credentials used by
     # login()/auth_headers(). Verify without network.
     mdlaw.MDL(username="user@example.com", password="s3cret")
-    assert mdlaw.MDL_USERNAME == "user@example.com"
-    assert mdlaw.MDL_PASSWORD == "s3cret"
+    assert mdlaw.client.MDL_USERNAME == "user@example.com"
+    assert mdlaw.client.MDL_PASSWORD == "s3cret"
     assert mdlaw.auth_enabled() is True
     # reset so other tests aren't affected
-    mdlaw.MDL_USERNAME = ""
-    mdlaw.MDL_PASSWORD = ""
+    mdlaw.client.MDL_USERNAME = ""
+    mdlaw.client.MDL_PASSWORD = ""
 
 
 def test_saved_session_roundtrip(monkeypatch, tmp_path):
@@ -237,40 +239,40 @@ def test_saved_session_roundtrip(monkeypatch, tmp_path):
     # later CLI/library calls reuse the token + refresh_token. Deterministic
     # via tmp_path + monkeypatch.
     auth_file = tmp_path / ".mdlaw_auth.json"
-    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
-    monkeypatch.setattr(mdlaw, "_PERSIST_AUTH", True)  # as `mdlaw auth` does
+    monkeypatch.setattr(mdlaw.client, "_AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(mdlaw.client, "_PERSIST_AUTH", True)  # as `mdlaw auth` does
 
-    mdlaw._auth.update({
+    mdlaw.client._auth.update({
         "token": "tok123",
         "refresh_token": "ref456",
         "device_id": "dev789",
         "expires_at": time.time() + 3600,
         "user": {"name": "Tester"},
     })
-    mdlaw._save_auth()
+    mdlaw.client._save_auth()
     assert auth_file.exists()
 
     # simulate a fresh process: clear in-memory state + credentials
-    mdlaw._auth.update({"token": None, "refresh_token": None,
+    mdlaw.client._auth.update({"token": None, "refresh_token": None,
                         "device_id": str(uuid.uuid4()), "expires_at": 0.0,
                         "user": None})
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
-    assert mdlaw._load_auth() is True
-    assert mdlaw._auth["token"] == "tok123"
-    assert mdlaw._auth["refresh_token"] == "ref456"
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "")
+    assert mdlaw.client._load_auth() is True
+    assert mdlaw.client._auth["token"] == "tok123"
+    assert mdlaw.client._auth["refresh_token"] == "ref456"
     assert mdlaw.auth_enabled() is True  # saved session → auth enabled
     # no fake credentials are injected any more
-    assert mdlaw.MDL_USERNAME == "" and mdlaw.MDL_PASSWORD == ""
+    assert mdlaw.client.MDL_USERNAME == "" and mdlaw.client.MDL_PASSWORD == ""
 
     # MDL() constructor auto-loads the saved session too
-    mdlaw._auth.update({"token": None, "refresh_token": None,
+    mdlaw.client._auth.update({"token": None, "refresh_token": None,
                         "device_id": str(uuid.uuid4()), "expires_at": 0.0,
                         "user": None})
-    monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
-    monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
+    monkeypatch.setattr(mdlaw.client, "MDL_USERNAME", "")
+    monkeypatch.setattr(mdlaw.client, "MDL_PASSWORD", "")
     mdlaw.MDL()
-    assert mdlaw._auth["token"] == "tok123"
+    assert mdlaw.client._auth["token"] == "tok123"
 
 
 def test_search_postfilter(monkeypatch):
@@ -286,7 +288,7 @@ def test_search_postfilter(monkeypatch):
     ]
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None):
         return feed
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
 
     async def run():
         mdl = mdlaw.MDL()
@@ -315,7 +317,7 @@ def test_browse_by_genre_detail_sources(monkeypatch):
             tid = int(path.split("/")[2].split("?")[0])
             return details[tid]
         return feed
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
 
     async def run():
         mdl = mdlaw.MDL()
@@ -336,7 +338,7 @@ def test_auth_status_shows_username(tmp_path, monkeypatch, capsys):
         "token": "t", "refresh_token": "r", "device_id": "d",
         "expires_at": time.time() + 3600, "user": None, "username": "nasa@x.com",
     }))
-    monkeypatch.setattr(mdlaw, "_AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(mdlaw.client, "_AUTH_FILE", str(auth_file))
     assert mdlaw.main(["auth", "status", "-o", "text"]) == 0
     out = capsys.readouterr().out
     assert "nasa@x.com" in out

@@ -108,11 +108,11 @@ def test_generic_renderer_for_unknown_list(monkeypatch, capsys):
 
 
 def test_cjk_width_alignment():
-    assert mdlaw._dw("陈哲远") == 6
-    assert mdlaw._dw(mdlaw._fit("陈哲远abc", 5)) == 5
-    rows = mdlaw._table(["Name", "X"], [["陈哲远", "1"], ["abc", "2"]])
+    assert mdlaw.cli._dw("陈哲远") == 6
+    assert mdlaw.cli._dw(mdlaw.cli._fit("陈哲远abc", 5)) == 5
+    rows = mdlaw.cli._table(["Name", "X"], [["陈哲远", "1"], ["abc", "2"]])
     # same display column even though the CJK row has fewer characters
-    assert mdlaw._dw(rows[2][:rows[2].index("1")]) == rows[3].index("2")
+    assert mdlaw.cli._dw(rows[2][:rows[2].index("1")]) == rows[3].index("2")
 
 
 # --- errors and exit codes ------------------------------------------------
@@ -165,7 +165,7 @@ class _Client:
 
 
 def test_verbose_logs_requests_to_stderr(monkeypatch, capsys):
-    monkeypatch.setattr(mdlaw, "get_client", lambda: _Client())
+    monkeypatch.setattr(mdlaw.client, "get_client", lambda: _Client())
     code, out, err = cli(monkeypatch, capsys, ["-v", "genres"])
     assert code == 0 and json.loads(out)[0]["name"] == "Action"
     assert "GET /genres -> 200" in err and "ms" in err
@@ -173,13 +173,13 @@ def test_verbose_logs_requests_to_stderr(monkeypatch, capsys):
 
 
 def test_quiet_by_default(monkeypatch, capsys):
-    monkeypatch.setattr(mdlaw, "get_client", lambda: _Client())
+    monkeypatch.setattr(mdlaw.client, "get_client", lambda: _Client())
     _, _, err = cli(monkeypatch, capsys, ["genres"])
     assert err == ""
 
 
 def test_vv_logs_cache_activity(monkeypatch, capsys):
-    monkeypatch.setattr(mdlaw, "get_client", lambda: _Client())
+    monkeypatch.setattr(mdlaw.client, "get_client", lambda: _Client())
     _, _, err = cli(monkeypatch, capsys, ["-vv", "genres"])
     assert "cache miss: GET /genres" in err
 
@@ -216,11 +216,11 @@ def test_logout_without_session(monkeypatch, capsys):
 def test_server_logging_level_and_format(monkeypatch):
     import logging
     monkeypatch.setenv("MDL_LOG_LEVEL", "debug")
-    mdlaw._setup_server_logging()
+    mdlaw.server._setup_server_logging()
     assert mdlaw.log.level == logging.DEBUG and not mdlaw.log.propagate
     rec = logging.LogRecord("mdlaw", logging.INFO, __file__, 1, "GET /x -> 200", None, None)
     assert mdlaw.log.handlers[0].format(rec) == "INFO:     mdlaw: GET /x -> 200"
-    mdlaw._setup_server_logging()  # idempotent: no second handler
+    mdlaw.server._setup_server_logging()  # idempotent: no second handler
     assert len(mdlaw.log.handlers) == 1
 
 

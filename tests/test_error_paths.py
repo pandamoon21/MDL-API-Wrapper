@@ -17,7 +17,7 @@ def test_payment_routes_hidden_from_schema_but_served(monkeypatch):
     async def fake_fetch(method, path, ttl=3600, auth=False, body=None, cache_key=None):
         calls.append(path)
         return {"ok": path}
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
     with TestClient(mdlaw.app) as cl:
         paths = cl.get("/openapi.json").json()["paths"]
         assert not any(p.startswith("/api/v1/payment") for p in paths)
@@ -59,14 +59,14 @@ def test_browse_by_genre_does_not_hide_bugs(monkeypatch):
 @pytest.mark.parametrize("token", [None, "opaque", "a.!!!.c", "a.bm90LWpzb24.c",
                                    "a.WzFd.c", "a.eyJleHAiOiJ4In0.c"])
 def test_set_tokens_falls_back_on_undecodable_jwt(token):
-    before = mdlaw.time.time()
-    mdlaw._set_tokens({"access_token": token})
-    assert mdlaw._auth["expires_at"] >= before + 6 * 3600 - 1
+    before = mdlaw.client.time.time()
+    mdlaw.client._set_tokens({"access_token": token})
+    assert mdlaw.client._auth["expires_at"] >= before + 6 * 3600 - 1
 
 
 def test_upstream_error_non_json_body():
-    assert mdlaw._upstream_error(500, "oops").detail["detail"] == "oops"
-    assert mdlaw._upstream_error(500, '{"m": 1}').detail["detail"] == {"m": 1}
+    assert mdlaw.client._upstream_error(500, "oops").detail["detail"] == "oops"
+    assert mdlaw.client._upstream_error(500, '{"m": 1}').detail["detail"] == {"m": 1}
 
 
 def test_sql_drivers_use_autocommit_and_decode_userinfo(monkeypatch):

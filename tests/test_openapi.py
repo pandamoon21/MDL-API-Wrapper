@@ -40,7 +40,7 @@ def test_documented_routes_pass_upstream_fields_through(monkeypatch):
 
     async def fake_fetch(*a, **k):
         return upstream
-    monkeypatch.setattr(mdlaw, "fetch", fake_fetch)
+    monkeypatch.setattr(mdlaw.client, "fetch", fake_fetch)
     with TestClient(mdlaw.app) as cl:
         r = cl.get("/api/v1/titles/686")
     assert r.status_code == 200

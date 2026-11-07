@@ -892,7 +892,15 @@ output/errors/exit codes and logging. All offline — no network.
 
 ```
 mdlaw/
-├── mdlaw.py            # the whole API: config, client, cache (memory/SQL), auth, routes
+├── mdlaw/              # the package
+│   ├── __init__.py     # public API re-exports (app, MDL, main, fetch, cache, ...)
+│   ├── __main__.py     # `python -m mdlaw` → CLI
+│   ├── _config.py      # API base, client nonce, version, logger, header scheme
+│   ├── caching.py      # cache backends: memory (TTL/LRU) and SQL (sqlite/mysql/postgres)
+│   ├── client.py       # upstream client, throttle, retries, auth, browse filters
+│   ├── server.py       # FastAPI app and routes (new endpoint: route here + MDL method + optional CLI)
+│   ├── library.py      # MDL — use mdlaw as a Python library
+│   └── cli.py          # `mdlaw` command line
 ├── pyproject.toml      # PyPI packaging (pip install mdlaw → console script)
 ├── LICENSE             # MIT
 ├── AGENTS.md           # AI-agent / dev instructions (install, verify, extend, pitfalls)
@@ -909,7 +917,11 @@ mdlaw/
 │   ├── conftest.py     # isolation fixture (no real session file, fresh state)
 │   ├── test_mdlaw.py   # core offline checks
 │   ├── test_hardening.py  # auth / error-handling / cache regression tests
-│   └── test_cli.py     # CLI output, errors, exit codes, logging
+│   ├── test_cli.py     # CLI output, errors, exit codes, logging
+│   ├── test_retry.py   # transient-failure retries and backoff
+│   ├── test_error_paths.py   # narrowed excepts, hidden payment routes, SQL driver settings
+│   ├── test_openapi.py # documented response schemas
+│   └── test_sql_backends.py  # MySQL/Postgres cache (skipped without a DB)
 ├── .github/workflows/
 │   ├── docker.yml      # GHCR image on version tags
 │   └── ci.yml          # ruff + pytest (manual trigger only)
@@ -924,7 +936,7 @@ mdlaw/
 - **Anonymous guest mode does not exist** — MDL's Firebase project has anonymous auth disabled. Account features need `MDL_USERNAME`/`MDL_PASSWORD`.
 - **One account per instance** — the wrapper holds a single token for all requests.
 - **Rate limits**: the MDL WAF soft-blocks bursts. `mdlaw` throttles outbound, but don't point heavy crawlers at it.
-- **Version drift**: if MDL updates the app's header scheme / key, endpoints may start returning 403. Update `mdlaw.py` constants (single place).
+- **Version drift**: if MDL updates the app's header scheme / key, endpoints may start returning 403. Update the constants in `mdlaw/_config.py` (single place).
 
 ---
 
@@ -932,7 +944,7 @@ mdlaw/
 
 ```bash
 # self-check (offline)
-python mdlaw.py self
+python -m mdlaw self
 
 # run dev server with auto-reload
 uvicorn mdlaw:app --reload --port 8000
