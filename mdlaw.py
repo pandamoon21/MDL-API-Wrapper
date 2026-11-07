@@ -525,6 +525,57 @@ def _transport_errors() -> tuple[tuple[type, ...], tuple[type, ...]]:
 
 _TIMEOUT_ERRORS, _TRANSPORT_ERRORS = _transport_errors()
 
+# Bounded retry for transient upstream failures (timeouts, connection errors,
+# 429, 502/503/504) on reads made through fetch(). MDL_RETRIES=0 disables it.
+# Auth calls (login/refresh) go through _auth_request() and are never retried.
+RETRIES = max(0, _env_int("MDL_RETRIES", 2))
+RETRY_BASE_DELAY = 0.5     # seconds; doubled per attempt, with jitter
+RETRY_MAX_DELAY = 10.0     # cap for both backoff and an upstream Retry-After
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+# POSTs that only read: the app's search/browse and calendar endpoints take
+# their params as a query string and change nothing server-side (their
+# responses are cached by fetch() like GETs). Any other POST is not retried.
+_READ_ONLY_POSTS = ("/search/", "/calendar/episodes")
+
+
+def _retryable(method: str, path: str) -> bool:
+    """Only idempotent reads are retried: GET, plus the read-only POSTs."""
+    method = method.upper()
+    if method == "GET":
+        return True
+    return method == "POST" and path.startswith(_READ_ONLY_POSTS)
+
+
+def _retry_after(r: Any) -> float | None:
+    """Seconds from an upstream Retry-After header (delta or HTTP-date)."""
+    try:
+        raw = r.headers.get("retry-after")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, parsedate_to_datetime(raw).timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with jitter for retry number ``attempt`` (1-based)."""
+    delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * 2 ** (attempt - 1))
+    return secrets.SystemRandom().uniform(delay / 2, delay)
+
+
+async def _retry_sleep(seconds: float) -> None:
+    """Indirection so tests can skip the real wait."""
+    await asyncio.sleep(seconds)
+
 
 async def _send(method: str, path: str, headers: dict | None = None,
                 body: dict | None = None) -> Any:
@@ -582,7 +633,8 @@ async def fetch(method: str, path: str, ttl: float,
     """GET/POST with cache + throttle. Returns parsed JSON (never caches errors).
     When auth=True and credentials are configured, sends a Bearer token and
     transparently refreshes + retries once on HTTP 401 (like the app's
-    _renewTokenInterceptor)."""
+    _renewTokenInterceptor). Reads (GET and read-only search POSTs) are also
+    retried up to RETRIES times on transient failures (MDL_RETRIES)."""
     key = cache_key or f"{method} {path}"
     hit = await _cache_call(cache.get, key)
     if hit is not None:
@@ -615,11 +667,44 @@ async def _fetch_upstream(method: str, path: str, ttl: float, body: dict | None,
                           key: str, auth: bool) -> object:
     headers = await auth_headers() if auth else None
     sent_token = _auth["token"]
-    r = await _send(method, path, headers, body)
-    if r.status_code == 401 and auth and auth_enabled():
-        log.info("upstream rejected the token (401); refreshing and retrying once")
-        await refresh(stale_token=sent_token)
-        r = await _send(method, path, await auth_headers(), body)
+    # One budget for the whole call: at most 1 + retries + 1 (the 401
+    # refresh) upstream requests, never retries x refreshes.
+    retries = RETRIES if _retryable(method, path) else 0
+    attempt = 0
+    refreshed = False
+    while True:
+        try:
+            r = await _send(method, path, headers, body)
+        except HTTPException as e:
+            # _send only raises for transport failures (502 error / 504 timeout)
+            if attempt >= retries:
+                raise
+            attempt += 1
+            delay = _backoff_delay(attempt)
+            log.warning("%s %s: transport error (HTTP %d); retry %d/%d in %.1fs",
+                        method, path, e.status_code, attempt, retries, delay)
+            await _retry_sleep(delay)
+            continue
+        if r.status_code == 401 and auth and auth_enabled() and not refreshed:
+            log.info("upstream rejected the token (401); refreshing and retrying once")
+            refreshed = True
+            await refresh(stale_token=sent_token)
+            headers = await auth_headers()
+            continue
+        if r.status_code in _RETRY_STATUSES and attempt < retries:
+            wait = _retry_after(r) if r.status_code in (429, 503) else None
+            if wait is not None and wait > RETRY_MAX_DELAY:
+                # Retrying sooner than upstream asked only feeds the WAF.
+                log.warning("%s %s -> %d; Retry-After %.0fs exceeds %.0fs, not retrying",
+                            method, path, r.status_code, wait, RETRY_MAX_DELAY)
+                break
+            attempt += 1
+            delay = wait if wait is not None else _backoff_delay(attempt)
+            log.warning("%s %s -> %d; retry %d/%d in %.1fs",
+                        method, path, r.status_code, attempt, retries, delay)
+            await _retry_sleep(delay)
+            continue
+        break
     data = _parse(r)
     await _cache_call(cache.put, key, data, ttl)
     return data

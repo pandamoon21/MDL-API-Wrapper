@@ -14,6 +14,10 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(mdlaw, "MDL_USERNAME", "")
     monkeypatch.setattr(mdlaw, "MDL_PASSWORD", "")
     monkeypatch.setattr(mdlaw, "MIN_INTERVAL", 0.0)
+
+    async def _no_wait(seconds):  # retry backoff: never really sleep in tests
+        pass
+    monkeypatch.setattr(mdlaw, "_retry_sleep", _no_wait)
     monkeypatch.setattr(mdlaw, "cache", mdlaw.TTLCache())
     # logger: the CLI/server attach handlers; start every test unconfigured
     monkeypatch.setattr(mdlaw.log, "handlers", [])
