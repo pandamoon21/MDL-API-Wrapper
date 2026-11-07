@@ -22,7 +22,7 @@ API_KEY = os.environ.get("MDL_API_KEY", "").strip() or "".join(
     secrets.choice(string.ascii_letters + string.digits) for _ in range(20)
 )
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 # Library code only logs to this logger. The CLI (-v / -vv) and the server
 # (MDL_LOG_LEVEL) attach handlers; library users configure it themselves.

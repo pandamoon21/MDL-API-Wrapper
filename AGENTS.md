@@ -39,7 +39,7 @@ curl http://localhost:8000/api/v1/genres
 python3 -m mdlaw self
 
 # full test suite (offline)
-python3 -m pytest tests/ -q      # expect: 94 passed
+python3 -m pytest tests/ -q      # expect: 140 passed, 14 skipped
 ```
 
 ## Project layout

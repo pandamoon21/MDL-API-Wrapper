@@ -878,7 +878,7 @@ Offline — no network needed:
 
 ```bash
 python -m pytest tests/ -q
-# 94 passed
+# 140 passed, 14 skipped (MySQL/Postgres, opt-in)
 ```
 
 Covers: headers and auth flow (login/refresh/deadlock regressions), upstream
