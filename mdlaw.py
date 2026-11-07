@@ -192,6 +192,11 @@ class SQLCache(CacheBackend):
         changed    INTEGER NOT NULL DEFAULT 0
     )"""
 
+    # PostgreSQL: REAL is a 4-byte float there (sqlite's REAL is 8 bytes). At
+    # Unix-epoch magnitudes a float4 step is 128 s, so expiry and timestamps
+    # were off by up to two minutes. DOUBLE PRECISION keeps sub-ms precision.
+    _SCHEMA_PG = _SCHEMA.replace("REAL", "DOUBLE PRECISION")
+
     # MySQL: `key` is a reserved word, and TEXT can't be a PRIMARY KEY without
     # a prefix length. VARCHAR(768) utf8mb4 = 3072 bytes, the InnoDB index max.
     _SCHEMA_MYSQL = """
@@ -233,37 +238,53 @@ class SQLCache(CacheBackend):
                 import pymysql
             except ImportError:
                 raise RuntimeError("MySQL cache backend requires: pip install pymysql")
-            from urllib.parse import urlsplit
+            from urllib.parse import unquote, urlsplit
             u = urlsplit(self.url)
+            # autocommit: a bare SELECT otherwise opens a REPEATABLE READ
+            # transaction that never ends, so get() kept serving the snapshot
+            # from its first read and never saw rows other workers wrote.
+            # Userinfo is percent-encoded in a URL (p%40ss for p@ss).
             return pymysql.connect(
                 host=u.hostname or "localhost", port=u.port or 3306,
-                user=u.username or "", password=u.password or "",
+                user=unquote(u.username or ""), password=unquote(u.password or ""),
                 database=u.path.lstrip("/") or "", charset="utf8mb4",
-                autocommit=False)
+                autocommit=True)
         # postgres
         try:
             import psycopg
         except ImportError:
             raise RuntimeError("PostgreSQL cache backend requires: pip install 'psycopg[binary]'")
-        return psycopg.connect(self.url)
+        # autocommit: without it every get() left the session "idle in
+        # transaction", and one failed statement aborted the transaction so
+        # all later queries failed until a rollback that never came.
+        return psycopg.connect(self.url, autocommit=True)
 
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
-        cur.execute(self._SCHEMA_MYSQL if self._flavor == "mysql" else self._SCHEMA)
+        cur.execute({"mysql": self._SCHEMA_MYSQL, "postgres": self._SCHEMA_PG}
+                    .get(self._flavor, self._SCHEMA))
         self._conn.commit()
         cur.close()
+
+    def _dead(self) -> bool:
+        """True when the driver has marked the connection unusable. Creating a
+        cursor never touches the network (pymysql) or fails only once closed
+        (psycopg), so a dropped server is seen on the failing query and the
+        next operation reconnects here."""
+        if self._flavor == "mysql":
+            return not getattr(self._conn, "open", True)
+        if self._flavor == "postgres":
+            return bool(getattr(self._conn, "closed", False))
+        return False
 
     def _cursor(self):
         if self._conn is None:
             self._conn = self._connect()
             self._init_schema()
-        try:
-            return self._conn.cursor()
-        except Exception:
-            # server went away — reconnect once
+        elif self._dead():
+            log.warning("%s cache connection lost; reconnecting", self._flavor)
             self._conn = self._connect()
-            self._init_schema()
-            return self._conn.cursor()
+        return self._conn.cursor()
 
     # -- ops ---------------------------------------------------------------
     def get(self, key: str) -> object | None:
@@ -461,7 +482,7 @@ async def close_client() -> None:
     if st.cffi is not None:
         try:
             await st.cffi.close()
-        except Exception:
+        except Exception:  # best-effort teardown; nothing useful to do on failure
             pass
         st.cffi = None
     if st.httpx is not None and not st.httpx.is_closed:
@@ -722,7 +743,7 @@ def _upstream_error(status: int, body: str) -> HTTPException:
                                              "browser/mobile TLS fingerprint."})
     try:
         detail = json.loads(body)
-    except Exception:
+    except ValueError:  # JSONDecodeError: non-JSON error body
         detail = body[:300]
     return HTTPException(status, {"error": True, "code": status, "detail": detail})
 
@@ -847,7 +868,9 @@ def _set_tokens(data: dict) -> None:
         payload += "=" * (-len(payload) % 4)
         exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0)
         _auth["expires_at"] = float(exp)
-    except Exception:
+    # Not a decodable JWT (no token, no dots, bad base64/JSON, non-dict
+    # payload, non-numeric exp): fall back to a 6h lifetime.
+    except (AttributeError, IndexError, TypeError, ValueError):
         _auth["expires_at"] = time.time() + 6 * 3600
 
 
@@ -1662,12 +1685,14 @@ async def search_tags(q: SearchQ) -> JSONResponse:
     return _resp(await fetch("GET", _qs("/tags/search", q=q), ttl=600), 600)
 
 
-@app.get("/api/v1/payment/plans")
+# Payment routes are outside a drama-data wrapper's scope: hidden from the
+# OpenAPI schema/docs, but still served so existing callers keep working.
+@app.get("/api/v1/payment/plans", include_in_schema=False)
 async def payment_plans() -> JSONResponse:
     return _resp(await fetch("GET", "/payment/plans", ttl=3600), 3600)
 
 
-@app.get("/api/v1/payment/coins")
+@app.get("/api/v1/payment/coins", include_in_schema=False)
 async def payment_coins() -> JSONResponse:
     return _resp(await fetch("GET", "/payment/coins", ttl=3600), 3600)
 
@@ -1878,7 +1903,13 @@ class MDL:
                 continue
             try:
                 detail = await self.title(tid)
-            except Exception:
+            except HTTPException as e:
+                # Missing credentials (400), a rejected session (401/428) or a
+                # Cloudflare block (403) fails every remaining title too —
+                # surface it instead of returning a silently empty list.
+                if e.status_code in (400, 401, 403, 428):
+                    raise
+                log.warning("genre_titles: skipping title %s (HTTP %s)", tid, e.status_code)
                 continue
             genres = detail.get("genres") or [] if isinstance(detail, dict) else []
             gids = [g.get("id") for g in genres]
