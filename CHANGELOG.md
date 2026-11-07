@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `py.typed` marker: mypy and pyright now use mdlaw's inline type hints.
+
+### Changed
+
+- CLI text rendering moved from `mdlaw/cli.py` into `mdlaw/render.py`.
+  Output is unchanged.
+- Tests: the `MDL` library wrappers (`library.py` 76% -> 100%) and the
+  renderers are covered offline. 140 -> 384 tests.
+
 ## [1.9.0] - 2026-11-07
 
 ### Added
