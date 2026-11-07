@@ -34,6 +34,7 @@ import httpx
 from typing import Annotated, Any
 from fastapi import FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from contextlib import asynccontextmanager
 
 # ---------------------------------------------------------------------------
@@ -1056,6 +1057,154 @@ def _require_admin(token: str | None) -> None:
                                   "detail": "missing or invalid X-Admin-Token"})
 
 
+# ---------------------------------------------------------------------------
+# OpenAPI response schemas (docs only)
+# ---------------------------------------------------------------------------
+# Attached with `responses={...}`, never `response_model=`: routes still return
+# the upstream JSON untouched. Upstream shapes belong to MDL and are only
+# partly known, so every model allows extra fields and every field is optional.
+# Fields listed here are the ones the code or tests actually read.
+class _Open(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class ErrorDetail(_Open):
+    """Body that every HTTPException raised by mdlaw carries."""
+    error: bool | None = None
+    code: int | None = None
+    detail: Any = None  # message string, or the upstream error JSON as-is
+
+
+class ErrorResponse(_Open):
+    """Error envelope: FastAPI wraps the HTTPException body under `detail`."""
+    detail: ErrorDetail | None = None
+
+
+class NamedRef(_Open):
+    """Genre/tag entry inside title detail. Partial; upstream-defined."""
+    id: int | None = None
+    name: str | None = None
+    slug: str | None = None
+
+
+class TitleDetail(_Open):
+    """GET /titles/{id}?expand=1. Partial; upstream-defined, extra fields pass through."""
+    id: int | None = None
+    title: str | None = None
+    year: int | None = None
+    episodes: int | None = None
+    runtime: int | None = None
+    rating: float | None = None
+    votes: int | None = None
+    ranked: int | None = None
+    popularity: int | None = None  # 99999 means not ranked
+    release_dates_fmt: str | None = None
+    alt_titles: list[str] | None = None
+    genres: list[NamedRef] | None = None
+    tags: list[NamedRef] | None = None
+    permalink: str | None = None
+    country: str | None = None
+    status: Any = None
+    watchers: int | None = None
+    certification: str | None = None
+
+
+class TitleSummary(_Open):
+    """One item of POST /search/titles (search and browse). Partial; upstream-defined.
+    Search items carry no `genres` field."""
+    id: int | None = None
+    title: str | None = None
+    year: int | None = None
+    type: str | None = None
+    media_type: str | None = None
+    country: str | None = None
+    language: str | None = None
+    rating: float | None = None
+
+
+class PersonDetail(_Open):
+    """GET /people/{id}. Partial; upstream-defined, extra fields pass through."""
+    id: int | None = None
+    name: str | None = None
+    original_name: str | None = None
+    biography: str | None = None
+    birthday: str | None = None
+    dod: str | None = None  # "0000-00-00" when alive
+    nationality: str | None = None
+    gender: str | None = None
+    flowers: int | None = None
+    ranked: int | None = None
+    permalink: str | None = None
+    slug: str | None = None
+
+
+class Health(_Open):
+    """GET /api/v1/health (built by mdlaw)."""
+    status: str | None = None
+    service: str | None = None
+    auth: bool | None = None
+
+
+class CacheStats(_Open):
+    """Cache backend stats (built by mdlaw)."""
+    backend: str | None = None
+    hits: int | None = None
+    misses: int | None = None
+    hit_rate: float | None = None
+    entries: int | None = None
+
+
+class AuthStatus(_Open):
+    """GET /api/v1/auth/status (built by mdlaw). Never contains tokens."""
+    configured: bool | None = None
+    logged_in: bool | None = None
+    user: Any = None
+    expires_at: float | None = None
+    last_login: float | None = None
+    last_refresh: float | None = None
+    refreshes: int | None = None
+    login_error: str | None = None
+
+
+class DashboardUpstream(_Open):
+    base: str | None = None
+    key_source: str | None = None
+    transport: str | None = None
+
+
+class DashboardAuth(_Open):
+    configured: bool | None = None
+    logged_in: bool | None = None
+    refreshes: int | None = None
+
+
+class DashboardRoute(_Open):
+    path: str | None = None
+    methods: list[str] | None = None
+
+
+class Dashboard(_Open):
+    """GET /api/v1/dashboard and /api/v1/status (built by mdlaw)."""
+    status: str | None = None
+    service: str | None = None
+    version: str | None = None
+    uptime_seconds: int | None = None
+    cache: CacheStats | None = None
+    upstream: DashboardUpstream | None = None
+    auth: DashboardAuth | None = None
+    routes: list[DashboardRoute] | None = None
+
+
+# Every mdlaw error (bad input, auth, upstream status, network) uses ErrorResponse.
+_ERRORS: dict = {"4XX": {"model": ErrorResponse, "description": "Client or upstream error"},
+                 "5XX": {"model": ErrorResponse, "description": "Upstream unreachable or failed"}}
+
+
+def _doc(model: object) -> dict:
+    """`responses=` for a route: documented 200 body plus the shared error body."""
+    return {200: {"model": model}, **_ERRORS}
+
+
 @app.get("/", include_in_schema=False)
 async def root():
     """Landing: point humans at the interactive docs."""
@@ -1067,7 +1216,7 @@ def _resp(data: object, ttl: float) -> JSONResponse:
     return JSONResponse(data, headers={"Cache-Control": f"public, max-age={int(ttl)}"})
 
 
-@app.get("/api/v1/auth/status")
+@app.get("/api/v1/auth/status", responses=_doc(AuthStatus))
 async def auth_status() -> dict:
     """Auth state: configured? logged in? token expiry, last refresh.
     Never includes the access/refresh tokens."""
@@ -1100,13 +1249,13 @@ async def auth_refresh(x_admin_token: str | None = Header(None)) -> dict:
     return await auth_status()
 
 
-@app.get("/api/v1/cache/stats")
+@app.get("/api/v1/cache/stats", responses=_doc(CacheStats))
 async def cache_stats() -> dict:
     """Cache backend info + hit stats."""
     return await _cache_call(cache.stats)
 
 
-@app.get("/api/v1/health")
+@app.get("/api/v1/health", responses={200: {"model": Health}})  # rate-limit exempt, never errors
 async def health() -> dict:
     return {
         "status": "ok",
@@ -1115,7 +1264,7 @@ async def health() -> dict:
     }
 
 
-@app.get("/api/v1/dashboard")
+@app.get("/api/v1/dashboard", responses=_doc(Dashboard))
 async def dashboard() -> dict:
     """Health dashboard: uptime, cache stats, per-route registry."""
     return {
@@ -1145,7 +1294,7 @@ async def dashboard() -> dict:
     }
 
 
-@app.get("/api/v1/status")
+@app.get("/api/v1/status", responses=_doc(Dashboard))
 async def status() -> JSONResponse:
     """Alias of /dashboard kept for monitoring probes."""
     return JSONResponse(await dashboard())
@@ -1196,7 +1345,7 @@ async def title_reviews(tid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/reviews", ttl=300), 300)
 
 
-@app.get("/api/v1/titles/{tid}")
+@app.get("/api/v1/titles/{tid}", responses=_doc(TitleDetail))
 async def title_detail(tid: PosId) -> JSONResponse:
     """Title detail — requires auth (upstream 400s without a token)."""
     return _resp(await fetch("GET", f"/titles/{tid}?expand=1", ttl=300, auth=True), 300)
@@ -1207,7 +1356,7 @@ async def title_recommendations(tid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/titles/{tid}/recommendations", ttl=600, auth=True), 600)
 
 
-@app.post("/api/v1/search")
+@app.post("/api/v1/search", responses=_doc(list[TitleSummary]))
 async def search(q: SearchQ, page: Page = 1) -> JSONResponse:
     """Search titles by keyword (POST /search/titles?edge=1&q=...&page=...)."""
     if not q.strip():
@@ -1229,7 +1378,7 @@ async def search_people(q: SearchQ, page: Page = 1) -> JSONResponse:
         ttl=300, auth=True), 300)
 
 
-@app.get("/api/v1/browse")
+@app.get("/api/v1/browse", responses=_doc(list[TitleSummary]))
 async def browse(
     kind: Annotated[list[str] | None, Query(alias="type", description="drama | movie | tv-show (or id); repeatable")] = None,
     genre: Annotated[list[str] | None, Query(description="genre name or id; repeatable")] = None,
@@ -1333,7 +1482,7 @@ async def leaderboard(period: str = "alltime") -> JSONResponse:
     return _resp(await fetch("GET", f"/people/leaderboard?time_period={period}", ttl=600), 600)
 
 
-@app.get("/api/v1/people/{pid}")
+@app.get("/api/v1/people/{pid}", responses=_doc(PersonDetail))
 async def people(pid: PosId) -> JSONResponse:
     return _resp(await fetch("GET", f"/people/{pid}", ttl=86400), 86400)
 
