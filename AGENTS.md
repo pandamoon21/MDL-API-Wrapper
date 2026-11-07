@@ -70,6 +70,7 @@ pytest.ini          # pythonpath = .
 | `MDL_CACHE_MAX_ENTRIES` | In-memory cache size (LRU) | no | `10000` |
 | `MDL_ADMIN_TOKEN` | Enables `POST /api/v1/auth/{login,refresh}` via `X-Admin-Token` | no | routes 404 |
 | `MDL_RATE_LIMIT` | Requests/minute per client IP on `/api/v1/*` (health exempt) | no | `0` (off) |
+| `MDL_RETRIES` | Retries for transient upstream failures on reads (GET + read-only search POSTs); `0` disables | no | `2` |
 | `MDL_TRUST_PROXY` | `1` → client IP from `Fly-Client-IP`/`X-Forwarded-For` | no | off |
 
 Copy `.env.example` to `.env` and fill in values; `mdlaw` reads env vars at
