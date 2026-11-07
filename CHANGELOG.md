@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reads retry transient upstream failures: timeouts, connection errors, 429
+  and 502/503/504. They retry up to `MDL_RETRIES` times (default 2, `0`
+  disables) with exponential backoff and jitter. On 429/503 they honour
+  `Retry-After` up to 10s. A longer `Retry-After` gives up at once instead of
+  hitting the WAF again early.
+  - Retried: GET, plus the read-only POSTs under `/search/` and
+    `/calendar/episodes`.
+  - Never retried: login, refresh and other POSTs.
+  - When upstream is down, an error can take a few seconds longer to come back.
+- OpenAPI (`/docs`) documents response schemas for the main routes: title
+  detail, search, browse, person, health, status/dashboard, cache stats and
+  auth status. The common error body is documented too. The schemas are
+  documentation only, and responses are passed through unfiltered.
+- Opt-in integration tests for the MySQL and PostgreSQL cache backends
+  (`MDL_TEST_MYSQL_URL`, `MDL_TEST_PG_URL`).
+
+### Changed
+
+- `mdlaw.py` is now a package (`mdlaw/`) split into config, cache, client,
+  server, library and CLI modules. `from mdlaw import app, MDL`,
+  `uvicorn mdlaw:app` and the `mdlaw` command still work. The offline
+  self-check is now `python -m mdlaw self`.
+- `MDL.browse_by_genre()` raises on 400/401/403/428 (for example, missing
+  credentials or a Cloudflare block) instead of silently returning `[]`.
+  Other per-title errors are logged and skipped.
+- `/api/v1/payment/plans` and `/api/v1/payment/coins` are hidden from the
+  OpenAPI schema. They still work.
+
+### Fixed
+
+- SQL cache, PostgreSQL: new tables store times as `DOUBLE PRECISION`.
+  `REAL` rounded today's timestamps to about 2-minute steps. To fix an
+  existing table, run
+  `ALTER TABLE mdlaw_cache ALTER COLUMN expires_at TYPE DOUBLE PRECISION`,
+  and do the same for `created_at` and `updated_at`.
+- SQL cache, MySQL and PostgreSQL: connections run in autocommit. Before this,
+  MySQL reads never saw rows written by other workers, and one failed
+  Postgres statement broke every later query.
+- SQL cache, MySQL: reconnects after a dropped connection.
+- SQL cache, MySQL: URL-encoded usernames and passwords are decoded.
+- Narrowed broad `except Exception` handlers in token-expiry parsing and
+  upstream error decoding.
+
 ## [1.8.0] - 2026-11-06
 
 ### Added
